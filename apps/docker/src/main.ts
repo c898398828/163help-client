@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ClientRuntime } from '../../../packages/core/src/index.ts';
 import { DockBrowser } from './browser.ts';
+import { createApi } from './api.ts';
 import { createStatusServer } from './server.ts';
 import { applyConfigPatch, type ConfigPatch } from './settings.ts';
 
@@ -63,33 +64,32 @@ const storage = {
   setExpires: () => {},
 };
 
+/** 服务端版本闸门当前只放行 3.x/4.x（5.x 会被 403 client_upgrade_required 拒绝）；
+ *  因此按协议等价版本上报，服务端放行 5.x 后可用 CLIENT_VERSION 环境变量改回。 */
+const CLIENT_VERSION = process.env.CLIENT_VERSION || '4.0.21';
+
 /** 记录最近一次服务端请求结果（状态条/诊断用）；状态由好变坏时记一条日志，避免刷屏 */
-function setLastApi(ok: boolean, status: number): void {
-  state.lastApi = { ok, status, at: Date.now() };
-  if (!ok && state.lastApiWasOk !== false) {
-    pushLog('warn', '服务端请求失败（' + (status || '网络不可达') + '），将持续重试');
+function setLastApi(r: { ok: boolean; status: number; at: number; error?: string }): void {
+  state.lastApi = { ok: r.ok, status: r.status, at: r.at };
+  if (!r.ok && state.lastApiWasOk !== false) {
+    if (r.status === 403 && r.error === 'client_upgrade_required') {
+      pushLog('error', `服务端要求升级客户端（403 client_upgrade_required）：上报版本 ${CLIENT_VERSION} 不被接受`);
+    } else if (r.status === 0) {
+      pushLog('warn', `服务端请求失败（网络不可达：${r.error || '未知原因'}），将持续重试`);
+    } else {
+      pushLog('warn', `服务端请求失败（${r.status}${r.error ? ' ' + r.error : ''}），将持续重试`);
+    }
   }
-  state.lastApiWasOk = ok;
+  state.lastApiWasOk = r.ok;
 }
 
-async function api<T>(method: string, pathName: string, body?: unknown, token = storage.getToken()): Promise<{ status: number; payload: T | null; error?: string }> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-Client-Type': 'docker', 'X-Music-Helper-Version': VERSION };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  try {
-    const res = await fetch(BASE + pathName, {
-      method, headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    setLastApi(res.status < 500, res.status);
-    const payload = res.status === 200 ? await res.json().catch(() => null) : null;
-    return { status: res.status, payload };
-  } catch (e) {
-    // 网络异常不抛出：返回 status 0，由主循环按重试节奏继续（避免未处理拒绝打挂进程）
-    const msg = e instanceof Error ? e.message : String(e);
-    setLastApi(false, 0);
-    return { status: 0, payload: null, error: 'network: ' + msg };
-  }
-}
+const api = createApi({
+  base: BASE,
+  version: CLIENT_VERSION,
+  clientType: 'docker',
+  getToken: () => storage.getToken(),
+  onResult: setLastApi,
+});
 
 let browser: DockBrowser | null = null;
 

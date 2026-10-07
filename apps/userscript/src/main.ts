@@ -45,7 +45,7 @@ async function api<T>(method: string, path: string, body?: unknown, token = stor
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const sign = token ? await buildSignHeaders(method, fullUrl, rawBody, token, subtleHmac, browserNonce) : null;
-  if (sign) { headers['X-MH-Nonce'] = sign.a; headers['X-MH-Ts'] = sign.t; headers['X-MH-Sig'] = sign.s; }
+  if (sign) Object.assign(headers, sign); // X-Timestamp / X-Nonce / X-Signature（与服务端 hmac.go 对齐）
   const res = await fetch(fullUrl, { method, headers: { ...headers, 'X-Music-Helper-Version': '5.1' }, body: body === undefined ? undefined : rawBody });
   const payload = res.status === 200 ? await res.json().catch(() => null) : null;
   return { status: res.status, payload };
