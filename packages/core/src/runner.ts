@@ -7,15 +7,15 @@ import { JobStateMachine, type CurrentJob } from './dispatch.js';
 import { HeartbeatEngine } from './heartbeat.js';
 import { ClientLogger } from './logger.js';
 import { EventBus } from './events.js';
-import type { ApiResult, ClientType, FinishInput, MePayload, NextPayload, PlatformAdapter } from './types.js';
+import type { ApiResult, ClientType, FinishInput, FinishPayload, MePayload, NextPayload, PlatformAdapter } from './types.js';
 
 /** 端侧必须提供的四件套 */
 export interface RuntimeDeps {
   adapter: PlatformAdapter;
   transport: {
     next(token: string): Promise<ApiResult<NextPayload>>;
-    finish(token: string, input: FinishInput): Promise<ApiResult<{ settled?: boolean }>>;
-    abandon(token: string, reason: string, detail: string): Promise<void>;
+    finish(token: string, input: FinishInput): Promise<ApiResult<FinishPayload>>;
+    abandon(token: string, reason: string, detail: string, jobId?: string): Promise<void>;
     heartbeat(token: string, input: { jobId: string; playedMs: number; positionMs: number; durationMs: number; monotonic: boolean }): Promise<boolean>;
     refresh(token: string): Promise<import('./types.js').LoginPayload | null>;
     me(): Promise<ApiResult<MePayload>>;
@@ -27,7 +27,7 @@ export interface RuntimeDeps {
     /** 命令播放器开始播 target（返回 false=加载失败，走放弃分支） */
     play(musicId: string, durationMs: number, ownerName: string): Promise<boolean>;
     /** 播放器停止（放弃/结算后） */
-    stop(): void;
+    stop(): void | Promise<void>;
     /** 订阅播放进度（接入心跳 pulse） */
     onProgress(cb: (playedMs: number, positionMs: number, durationMs: number) => void): void;
   };
@@ -51,6 +51,7 @@ export class ClientRuntime {
     this.auth = new AuthManager(deps.adapter, {
       refresh: (t) => deps.transport.refresh(t),
       me: () => deps.transport.me(),
+      canRefresh: deps.transport.canRefresh,
       login: async () => null, // 登录走页面 oauth
     }, this.bus);
 
@@ -69,12 +70,16 @@ export class ClientRuntime {
         this.on401(r.status);
         return r;
       },
-      abandon: async (r, d) => {
+      abandon: async (r, d, jobId) => {
         const token = await this.auth.ensureToken();
-        if (token) { try { await this.deps.transport.abandon(token, r, d); } catch { /* 静默 */ } }
+        if (token) { try { await this.deps.transport.abandon(token, r, d, jobId); } catch { /* 静默 */ } }
         this.log.push('warn', 'job_abandon', r, { detail: d });
       },
       onPlaying: (job) => {
+        if (!this.running) {
+          void this.job.abandon('runtime_stopped', '暂停期间返回的任务，使用旧凭证释放');
+          return;
+        }
         this.heart.start(job.jobId);
         this.lastAdvanceMs = -1;
         this.lastAdvanceAt = -1;
@@ -97,13 +102,15 @@ export class ClientRuntime {
       },
     }, deps.adapter, {
       onAbandon: (reason, detail) => {
-        this.log.push('error', 'heartbeat_abandon', reason, { detail });
+        this.log.push('error', 'heartbeat_abandon', `${reason}：${detail}`);
+        void this.stopPlayer();
         void this.job.abandon(reason, detail);
       },
       onResume: () => this.log.push('info', 'hb_resume', '恢复续听'),
     });
 
     deps.player.onProgress((playedMs, positionMs, durationMs) => {
+      if (!this.running || this.finishing || this.job.phase !== 'playing') return;
       this.job.updateProgress(playedMs);
       this.heart.update(playedMs, positionMs, durationMs); // 只更新进度：按协议每 10s 由心跳引擎上报一次
       this.trackProgress(playedMs);
@@ -117,11 +124,48 @@ export class ClientRuntime {
   }
 
   async start(autostart: boolean): Promise<void> {
-    await this.auth.refreshUser();
-    if (autostart && this.auth.hasToken()) {
+    await this.syncUser();
+    if (this.auth.status === 'valid') this.authFailed = false;
+    if (autostart && this.auth.hasToken() && this.auth.status !== 'logged_out') {
       this.running = true;
+      this.startSync();
       void this.cycle();
     }
+  }
+
+  private syncTimer: ReturnType<typeof setInterval> | null = null;
+  private syncPending: Promise<void> | null = null;
+  private wakeCycle: (() => void) | null = null;
+  private playerStopping: Promise<void> = Promise.resolve();
+
+  private stopPlayer(): Promise<void> {
+    try {
+      const pending = Promise.resolve(this.deps.player.stop()).catch(() => {});
+      this.playerStopping = Promise.all([this.playerStopping, pending]).then(() => {});
+    } catch { /* 播放器已销毁 */ }
+    return this.playerStopping;
+  }
+
+  private startSync(): void {
+    if (!this.syncTimer) this.syncTimer = setInterval(() => { void this.syncUser(); }, 30_000);
+  }
+
+  private async syncUser(): Promise<void> {
+    if (this.syncPending) return this.syncPending;
+    this.syncPending = this.auth.refreshUser().catch((e) => {
+      this.log.push('warn', 'stats_sync_failed', `账号数据暂未同步：${String(e)}`);
+    });
+    try { await this.syncPending; }
+    finally { this.syncPending = null; }
+  }
+
+  private waitCycle(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(done, ms);
+      const self = this;
+      function done() { clearTimeout(timer); self.wakeCycle = null; resolve(); }
+      this.wakeCycle = done;
+    });
   }
 
   private running = false;
@@ -150,7 +194,7 @@ export class ClientRuntime {
       this.heart.stop();
       this.log.push('warn', 'playback_stalled', `播放进度停滞 ${Math.round((now - this.lastAdvanceAt) / 1000)}s（疑似试听卡死），放弃本单领下一单`);
       void this.job.abandon('playback_stalled', `进度 ${Math.round(playedMs / 1000)}s 停滞`);
-      this.deps.player.stop();
+      void this.stopPlayer();
     }
   }
 
@@ -164,8 +208,19 @@ export class ClientRuntime {
   /** 停止主循环与心跳（进程退出/测试用；已提交的 finish 不受影响） */
   stop(): void {
     this.running = false;
+    if (this.syncTimer) { clearInterval(this.syncTimer); this.syncTimer = null; }
+    this.wakeCycle?.();
     this.heart.stop();
-    try { this.deps.player.stop(); } catch { /* 播放器已销毁 */ }
+    void this.stopPlayer();
+  }
+
+  /** 配置切换/浏览器重建前，先使用旧凭证结束在途任务。 */
+  async suspend(reason: string): Promise<void> {
+    this.stop();
+    if (!this.finishing) await this.job.abandon(reason, '客户端暂停，等待旧任务结束');
+    await this.job.waitForIdle();
+    await this.playerStopping;
+    if (this.syncPending) await this.syncPending;
   }
 
   /** 主循环：领单 → 播 → 结束/失败 → 下一单（带 3s 间隔与退出） */
@@ -190,6 +245,8 @@ export class ClientRuntime {
         }
         let wait = this.deps.timing?.idleMs ?? IDLE_POLL_MS;
         try {
+          await this.playerStopping;
+          if (!this.running) break;
           const p = await this.job.fetchNext();
           if (p && p.noTargetReason) {
             const reason = formatNoTarget(p.noTargetReason);
@@ -210,10 +267,12 @@ export class ClientRuntime {
             this.log.push('warn', 'cycle_error', msg);
           }
         }
-        await sleep(wait);
+        if (this.running) await this.waitCycle(wait);
       }
     } finally {
       this.cycling = false;
+      this.running = false;
+      if (this.syncTimer) { clearInterval(this.syncTimer); this.syncTimer = null; }
     }
   }
 
@@ -227,7 +286,7 @@ export class ClientRuntime {
   /** 播放完成判定：达到目标时长，或歌曲先于目标播完（避免永久卡单）→ 结算并让主循环领下一单 */
   private async maybeFinish(positionMs: number, durationMs: number): Promise<void> {
     const job = this.job.current;
-    if (!job || this.finishing || !this.running) return;
+    if (!job || this.job.phase !== 'playing' || this.finishing || !this.running) return;
     const playedMs = job.playedMs;
     const reachedTarget = job.targetMs > 0 && playedMs >= job.targetMs;
     const songEnded = durationMs > 0 && playedMs >= durationMs;
@@ -235,28 +294,29 @@ export class ClientRuntime {
     this.finishing = true;
     try {
       this.heart.stop();
+      await this.stopPlayer();
       const r = await this.job.submitFinish({
         jobId: job.jobId, playedMs, positionMs, durationMs,
         playbackRate: 1, jumpCount: 0, backwardJumpCount: 0,
         listenDriftMs: 0, recoveryAttempts: 0, stallDetected: false,
       });
       this.log.push(r === 'settled' ? 'info' : 'warn', 'job_finish', `本单结算：${r}`, { playedMs, targetMs: job.targetMs });
-      this.deps.player.stop();
+      if (this.running) void this.syncUser();
     } finally {
       this.finishing = false;
     }
   }
 
-  private _sessionAccepted = false;
   /** 登录页回调（oauth 成功后） */
   acceptSession(p: import('./types.js').LoginPayload): void {
     this.auth.acceptSession(p);
-    this.log.push('info', 'session', '会话已建立'); // B5：触发 log:append
-    if (!this._sessionAccepted) { this._sessionAccepted = true; void this.cycle(); }
+    this.authFailed = false;
+    this.running = true;
+    this.log.push('info', 'session', '会话已建立');
+    this.startSync();
+    void this.cycle(); // cycle 本身防重入，重新登录仍可恢复
   }
 }
-
-function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)); }
 
 /** 播放进度停滞阈值（与 4.x 客户端一致：40s 不动判定试听卡死） */
 const PLAYBACK_STALL_MS = 40_000;

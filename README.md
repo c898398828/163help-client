@@ -107,6 +107,24 @@ docker load -i /tmp/163music-docker-client.tar.gz
 - **发布产物**（根目录 user.js / extension/）由私有仓同步与 CI 构建更新，用户无需关心构建过程。
 - **源码**（packages/ + apps/）是 v5 客户端的 monorepo，一个核心三端复用。
 
+## 本地验证（Docker / core）
+
+建议使用 **Node.js 24 LTS** 运行 TypeScript 回归测试；Docker 镜像内仍运行预编译后的 JS。
+
+```bash
+npm ci --prefix packages/core
+npm install --prefix apps/docker --ignore-scripts --no-audit
+npm test --prefix packages/core
+npm test --prefix apps/docker
+npm run build --prefix apps/docker
+```
+
+- core 测试会先编译，避免误测旧 `dist/`；测试文件不应加入 `.gitignore`。
+- Docker 状态页每 2 秒读取本机快照；远端账号统计在启动、结算后和运行期间每 30 秒刷新。
+- “已完成”仅统计本进程获服务端确认入账的任务，不是账号全天的总任务数。
+- `ECONNRESET` 表示连接被重置，不能单凭它判定是服务器、代理还是网络设备导致；`409 job_not_active` 则是服务端的任务状态拒绝，不是网络不可达。
+- 本地测试使用受控 HTTP 服务和播放器替身，不代表已验证线上账号、音源、服务端结算规则。发布前还需完成一轮真实任务验证。
+
 ## 构建与发布
 
 | 操作 | 触发 | 产物 |

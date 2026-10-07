@@ -7,7 +7,7 @@
   "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --test --experimental-strip-types --test-isolation=none tests/heartbeat.test.ts tests/auth.test.ts tests/sign.test.ts tests/runner.test.ts"
+    "test": "npm run build && node --test tests/*.test.ts"
   },
   "devDependencies": {
     "typescript": "^5.5.0"

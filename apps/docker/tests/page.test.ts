@@ -1,6 +1,9 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildPage } from '../src/page.ts';
+import { createStatusServer } from '../src/server.ts';
+import { once } from 'node:events';
+import type { AddressInfo } from 'node:net';
 
 describe('docker 管理端页面模板', () => {
   const authed = buildPage({ authed: true, configured: true });
@@ -42,4 +45,35 @@ describe('docker 管理端页面模板', () => {
     const missing = [...new Set(refs)].filter((id) => !authed.includes(`id="${id}"`));
     assert.deepEqual(missing, [], `脚本引用了模板中不存在的 id：${missing.join(', ')}`);
   });
+});
+
+test('/api/state 保留显式零额度，仅在缺省时使用默认额度', async (t) => {
+  const oldPassword = process.env.UI_PASSWORD;
+  process.env.UI_PASSWORD = 'local-test-password';
+  const state: Record<string, any> = { helpLimit: 0, recvLimit: 0 };
+  const server = createStatusServer({ port: 0, state });
+  if (oldPassword === undefined) delete process.env.UI_PASSWORD;
+  else process.env.UI_PASSWORD = oldPassword;
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+  });
+  await once(server, 'listening');
+  const base = 'http://127.0.0.1:' + (server.address() as AddressInfo).port;
+  const login = await fetch(base + '/api/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'local-test-password' }),
+  });
+  assert.equal(login.status, 200);
+  await login.json();
+  const cookie = login.headers.get('set-cookie')!.split(';')[0]!;
+  for (const value of [0, undefined, null]) {
+    state.helpLimit = value;
+    state.recvLimit = value;
+    const response = await fetch(base + '/api/state', { headers: { cookie } });
+    assert.equal(response.status, 200);
+    const snapshot = await response.json();
+    assert.equal(snapshot.helpLimit, value === 0 ? 0 : 9000);
+    assert.equal(snapshot.recvLimit, value === 0 ? 0 : 26);
+  }
 });

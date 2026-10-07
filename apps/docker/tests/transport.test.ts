@@ -20,6 +20,14 @@ function fakeApi(replies: Array<Partial<ApiResponse<unknown>>>) {
 const identity = { id: '8888', name: 'CoC', vipType: 11 };
 
 describe('docker 传输层（对齐 4.x 请求形状）', () => {
+  test('放弃请求携带准确 jobId，不能只发送原因', async () => {
+    const { api, calls } = fakeApi([{ status: 200, payload: { ok: true } }]);
+    const t = createTransport({ api: api as never, getIdentity: async () => identity });
+    await t.abandon('old-token', 'playback_stalled', '40s', 'old-job');
+    assert.deepEqual(calls[0]!.body, { jobId: 'old-job', reason: 'playback_stalled', detail: '40s' });
+    assert.equal(calls[0]!.token, 'old-token');
+  });
+
   test('心跳体带 neteaseId / neteaseName，并保留进度字段', async () => {
     const { api, calls } = fakeApi([{ status: 200, payload: { ok: true } }]);
     const t = createTransport({ api: api as never, getIdentity: async () => identity });

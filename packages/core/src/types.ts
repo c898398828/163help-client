@@ -6,7 +6,7 @@ export type ClientType = 'userscript' | 'extension' | 'docker';
 export type JobStatus = 'issued' | 'finished' | 'rejected' | 'expired';
 export type LogLevel = 'info' | 'warn' | 'error';
 export type AuthStatus = 'no_token' | 'refreshing' | 'valid' | 'logged_out';
-export type JobPhase = 'idle' | 'fetching' | 'playing' | 'abandoning' | 'settle_failed';
+export type JobPhase = 'idle' | 'fetching' | 'playing' | 'settling' | 'abandoning' | 'settle_failed';
 
 /** 平台差异抽象：存储/网络/页面能力 */
 export interface PlatformAdapter {
@@ -81,6 +81,15 @@ export interface FinishInput {
   listenDriftMs: number;
   recoveryAttempts: number;
   stallDetected: boolean;
+}
+
+/** 结算必须有成功确认；HTTP 200 本身不代表任务入账。 */
+export interface FinishPayload {
+  ok?: boolean;
+  settled?: boolean;
+  credited?: boolean;
+  error?: string;
+  participant?: ParticipantInfo;
 }
 
 /** 心跳上报体 */
@@ -160,6 +169,7 @@ export interface CoreEventMap {
   'auth:status': AuthStatus;
   'auth:user': { displayName: string; credits: number } | null;
   'job:phase': JobPhase;
+  'job:settled': { jobId: string; credited: boolean };
   'job:current': { jobId: string; musicId: string; musicName: string; targetMs: number; playedMs: number } | null;
   'job:progress': { jobId: string; playedMs: number; positionMs: number };
   'heartbeat:tick': { jobId: string; intervalMs: number; lastAtMs: number };

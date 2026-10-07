@@ -3,7 +3,7 @@
  * 凭证：配置的 portal 客户端密钥（mh_ck_）作为存储 token（服务端 key 认证）
  * 管理端：server.js（:3000 容器内，宿主映射 13000）
  * 启动顺序：先起管理端（浏览器/网络异常时也能进 UI 看日志、改配置）→ 再拉起浏览器与任务循环。
- * 配置流：管理页保存 → session.json 落盘（失败即报错，不假报成功）→ 立即应用（Cookie 重载页面 / 启动任务循环）。
+ * 配置流：管理页保存 → 旧任务排空 → session.json 落盘 → 应用变更（仅 Cookie 变化时重载；任一步失败均报错）。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -100,53 +100,85 @@ const api = createApi({
 });
 
 let browser: DockBrowser | null = null;
+let browserLaunch: Promise<boolean> | null = null;
+let lifecycle: Promise<unknown> = Promise.resolve();
 
-/** 拉起无头浏览器；失败不致命（管理端继续可用，后台定时重试） */
-async function launchBrowser(): Promise<boolean> {
-  try {
-    if (browser) { try { await browser.close(); } catch { /* 旧实例已失效 */ } }
-    const b = new DockBrowser(DATA_DIR, String(cfg.load().neteaseCookie || ''));
-    await b.launch();
-    browser = b;
-    state.browserReady = true;
-    b.onDisconnect(() => {
-      if (browser !== b) return; // 已被新实例替换
-      browser = null;
-      state.browserReady = false;
-      pushLog('error', '浏览器已断开（崩溃或被杀），5 秒后自动重连');
-      setTimeout(() => { if (!browser) void launchBrowser(); }, 5000);
-    });
-    pushLog('info', '浏览器已就绪');
-    return true;
-  } catch (e) {
-    browser = null;
-    state.browserReady = false;
-    pushLog('error', '浏览器启动失败：' + (e instanceof Error ? e.message : String(e)));
-    return false;
-  }
+/** 配置保存、启动和断线恢复共用队列，旧任务排空之前不能切换凭证或播放器。 */
+function serializeLifecycle<T>(action: () => Promise<T>): Promise<T> {
+  const next = lifecycle.then(action);
+  lifecycle = next.catch(() => {}); // 单次失败不堵塞后续配置修复
+  return next;
 }
 
-const transport = createTransport({
-  api,
-  // 心跳带上网易云身份（服务端据此校验播放账号）；同时刷新 X-Vip-Type 缓存
-  getIdentity: async () => {
-    if (!browser) return { id: '', name: '', vipType: 0 };
-    const ident = await browser.identity();
-    if (ident.vipType) vipTypeCache = ident.vipType;
-    return ident;
-  },
-});
+/** 拉起无头浏览器；并发调用复用同一次启动，失败时关闭半初始化实例。 */
+async function launchBrowser(): Promise<boolean> {
+  if (browserLaunch) return browserLaunch;
+  if (browser) return true;
+  const b = new DockBrowser(DATA_DIR, String(cfg.load().neteaseCookie || ''));
+  browserLaunch = (async () => {
+    try {
+      await b.launch();
+      browser = b;
+      state.browserReady = true;
+      b.onDisconnect(() => {
+        if (browser !== b) return; // 已被替换或主动关闭
+        browser = null;
+        state.browserReady = false;
+        vipTypeCache = 0;
+        pushLog('error', '浏览器已断开（崩溃或被杀），暂停任务后自动重连');
+        void serializeLifecycle(async () => {
+          // 排队期间配置可能已恢复新实例或清空；旧回调只清理旧浏览器，不暂停新任务。
+          const ownsRecovery = !browser && state.configured;
+          if (ownsRecovery) await runtime.suspend('browser_disconnected');
+          try { await b.close(); } catch { /* 已断开 */ }
+          if (ownsRecovery && !browser && state.configured) {
+            setTimeout(() => { void recoverBrowser(); }, 5000);
+          }
+        }).catch((e) => pushLog('error', '浏览器断线暂停失败：' + String(e)));
+      });
+      pushLog('info', '浏览器已就绪');
+      return true;
+    } catch (e) {
+      try { await b.close(); } catch { /* 半初始化实例也必须释放 */ }
+      browser = null;
+      state.browserReady = false;
+      pushLog('error', '浏览器启动失败：' + (e instanceof Error ? e.message : String(e)));
+      return false;
+    }
+  })();
+  try { return await browserLaunch; }
+  finally { browserLaunch = null; }
+}
 
+/** 启动前和心跳时刷新身份；0 也是有效等级，不能沿用上一账号的 VIP。 */
+async function refreshIdentity() {
+  const b = browser;
+  const empty = { id: '', name: '', vipType: 0 };
+  if (!b) { vipTypeCache = 0; return empty; }
+  const ident = await b.identity();
+  if (browser !== b) return empty;
+  vipTypeCache = Number.isFinite(ident.vipType) ? ident.vipType : 0;
+  return ident;
+}
+
+const transport = createTransport({ api, getIdentity: refreshIdentity });
+
+let currentJobId: string | null = null;
 const player = {
   play: async (musicId: string, durationMs: number) => {
     if (!browser) return false;
     try { return await browser.play(musicId, durationMs); } catch { return false; }
   },
-  stop: () => { try { void browser?.stop(); } catch { /* 页面可能已关闭 */ } },
+  stop: async () => { try { await browser?.stop(); } catch { /* 页面可能已关闭 */ } },
   onProgress: (cb: (playedMs: number, positionMs: number, durationMs: number) => void) => {
     setInterval(async () => {
-      if (!browser) return;
-      try { const p = await browser.progress(); if (p.playedMs > 0) cb(p.playedMs, p.playedMs, p.durationMs); } catch { /* 页面繁忙 */ }
+      const b = browser;
+      const jobId = currentJobId;
+      if (!b || !jobId) return;
+      try {
+        const p = await b.progress();
+        if (browser === b && currentJobId === jobId && p.playedMs > 0) cb(p.playedMs, p.playedMs, p.durationMs);
+      } catch { /* 页面繁忙或任务已切换 */ }
     }, 1000);
   },
 };
@@ -157,11 +189,18 @@ const runtime = new ClientRuntime({ adapter: {
 }, transport, player } as never);
 
 runtime.bus.on('job:current', (j) => {
-  if (j) { state.job = { musicName: j.musicName, playedMs: 0, targetMs: j.targetMs }; }
-  else { if (state.job) state.jobsDone += 1; state.job = null; }
+  const jobId = j?.jobId ?? null;
+  if (jobId !== currentJobId) state.hbIntervals = [];
+  currentJobId = jobId;
+  state.job = j ? { musicName: j.musicName, playedMs: 0, targetMs: j.targetMs } : null;
 });
+runtime.bus.on('job:settled', (s) => { if (s.credited) state.jobsDone += 1; });
 runtime.bus.on('job:progress', (p) => { if (state.job) state.job.playedMs = p.playedMs; });
-runtime.bus.on('heartbeat:tick', (t) => { state.hbIntervals.push(t.intervalMs); if (state.hbIntervals.length > 30) state.hbIntervals.shift(); });
+runtime.bus.on('heartbeat:tick', (t) => {
+  if (!currentJobId || t.jobId !== currentJobId) return;
+  state.hbIntervals.push(t.intervalMs);
+  if (state.hbIntervals.length > 30) state.hbIntervals.shift();
+});
 runtime.bus.on('auth:user', (u) => { state.acctName = u ? u.displayName : ''; state.credits = u ? u.credits : 0; });
 runtime.bus.on('auth:status', (s) => {
   state.authStatus = s;
@@ -173,36 +212,79 @@ runtime.bus.on('limits:updated', (s) => {
 });
 runtime.bus.on('log:append', (e) => { pushLog(e.level, e.msg); });
 
-/** 管理端保存配置：落盘 → 立即应用（Cookie 重载页面；密钥就绪则启动任务循环） */
-state.onConfig = async (patch: ConfigPatch) => {
+/** 恢复任务前先刷新 VIP，保证首个 /me、/next 已带当前网易云账号等级。 */
+async function startConfiguredRuntime(): Promise<void> {
+  if (!state.configured) return;
+  const b = browser;
+  if (!b) throw new Error('浏览器未就绪，无法启动任务');
+  await refreshIdentity();
+  if (browser !== b) throw new Error('浏览器已断开，无法启动任务');
+  await runtime.start(true);
+  if (browser !== b) throw new Error('浏览器已断开，任务启动未完成');
+}
+
+async function recoverBrowser(): Promise<void> {
+  await serializeLifecycle(async () => {
+    if (!state.configured || browser) return;
+    if (await launchBrowser()) await startConfiguredRuntime();
+  }).catch((e) => pushLog('error', '浏览器恢复失败：' + String(e)));
+}
+
+/** 保存串行化：旧凭证任务排空 → 落盘 → 应用；应用失败必须让管理端返回错误。 */
+state.onConfig = (patch: ConfigPatch) => serializeLifecycle(async () => {
   const cur = cfg.load();
+  const oldCookie = String(cur.neteaseCookie || '');
+  const oldKey = String(cur.clientKey || '');
   const result = applyConfigPatch(cur, patch);
   if (result.error) return result;
-  cfg.save(cur); // 写盘失败会抛出 → 管理端返回 500
-  state.configured = Boolean(String(cur.neteaseCookie || '').trim() && String(cur.clientKey || '').trim());
-  if (browser) {
-    try { await browser.setCookie(String(cur.neteaseCookie || '')); }
-    catch (e) { pushLog('warn', 'Cookie 应用失败（下次启动生效）：' + (e instanceof Error ? e.message : String(e))); }
-  } else if (cur.neteaseCookie) {
-    await launchBrowser();
+  const cookie = String(cur.neteaseCookie || '');
+  const cookieChanged = cookie !== oldCookie;
+  if (cookieChanged || String(cur.clientKey || '') !== oldKey || patch.clear === true) {
+    await runtime.suspend('config_changed');
   }
-  if (state.configured && browser) void runtime.start(true);
+  cfg.save(cur); // 写盘失败会抛出；此时旧任务已安全暂停，后续保存可重试
+  state.configured = Boolean(cookie.trim() && String(cur.clientKey || '').trim());
+  if (cookieChanged) vipTypeCache = 0;
+  if (!state.configured) {
+    state.acctName = ''; state.credits = 0; state.authStatus = 'logged_out';
+  }
+  try {
+    if (!cookie) {
+      const b = browser;
+      browser = null;
+      state.browserReady = false;
+      if (b) await b.close();
+    } else if (browser && cookieChanged) {
+      const b = browser;
+      try { await b.setCookie(cookie); }
+      catch (e) {
+        browser = null;
+        state.browserReady = false;
+        try { await b.close(); } catch { /* 不保留半更新的登录态 */ }
+        throw e;
+      }
+    } else if (!browser && !(await launchBrowser())) {
+      throw new Error('浏览器启动失败，配置尚未应用');
+    }
+    await startConfiguredRuntime();
+  } catch (e) {
+    await runtime.suspend('config_apply_failed');
+    pushLog('error', '配置应用失败：' + String(e));
+    throw e;
+  }
   pushLog('info', '配置已保存' + (result.saved.length ? '：' + result.saved.join('/') : '（无变化）'));
   return result;
-};
+});
 
 async function main() {
   // 先起管理端：浏览器/网络异常时仍能进 UI 看日志、改配置
   createStatusServer({ port: Number(process.env.PORT || 3000), state });
   console.log('[main] 管理端 http://0.0.0.0:3000');
 
-  if (await launchBrowser()) void runtime.start(true);
+  await recoverBrowser();
 
-  // 浏览器缺失时后台重试（VPS 冷启动网络未就绪、崩溃后自愈）
-  setInterval(async () => {
-    if (browser) return;
-    if (await launchBrowser()) void runtime.start(true);
-  }, 60_000);
+  // 浏览器缺失且仍已配置时后台重试；与配置保存、断线暂停串行。
+  setInterval(() => { void recoverBrowser(); }, 60_000);
 }
 
 main().catch((e) => { console.error('[main] fatal', e); process.exit(1); });

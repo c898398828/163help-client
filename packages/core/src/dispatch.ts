@@ -4,12 +4,12 @@
  * finish 被拒（job_expired 等）→ 明示并进入下一单（无宽容语义）
  */
 import { EventBus } from './events.js';
-import type { ApiResult, FinishInput, JobPhase, NextPayload } from './types.js';
+import type { ApiResult, FinishInput, FinishPayload, JobPhase, NextPayload } from './types.js';
 
 export interface DispatchDeps {
   next(): Promise<ApiResult<NextPayload>>;
-  finish(input: FinishInput): Promise<ApiResult<{ settled?: boolean }>>;
-  abandon(reason: string, detail: string): Promise<void>;
+  finish(input: FinishInput): Promise<ApiResult<FinishPayload>>;
+  abandon(reason: string, detail: string, jobId: string): Promise<void>;
   /** 播放开始回调：由 UI/播放器拉起心跳 */
   onPlaying(job: CurrentJob): void;
   /** 结算失败提示（403/过期等）——明示「无心跳未结算，请重新听」 */
@@ -29,12 +29,20 @@ export class JobStateMachine {
   phase: JobPhase = 'idle';
   current: CurrentJob | null = null;
   private busy = false; // 防重入
+  private idleWaiters: Array<() => void> = [];
+
+  /** 配置切换必须等旧任务领取/结算/放弃完成，再替换凭证。 */
+  waitForIdle(): Promise<void> {
+    if (this.phase === 'idle') return Promise.resolve();
+    return new Promise(resolve => this.idleWaiters.push(resolve));
+  }
 
   constructor(private deps: DispatchDeps, private bus: EventBus) {}
 
   private setPhase(p: JobPhase): void {
     this.phase = p;
     this.bus.emit('job:phase', p);
+    if (p === 'idle') this.idleWaiters.splice(0).forEach(resolve => resolve());
   }
 
   /** 领取下一单（空闲时调用；防并发） */
@@ -75,34 +83,38 @@ export class JobStateMachine {
     this.bus.emit('job:progress', { jobId: this.current.jobId, playedMs, positionMs: playedMs });
   }
 
-  /** 播放完成提交 */
+  /** 播放完成提交；与放弃互斥，只有服务端明确确认才算成功。 */
   async submitFinish(input: FinishInput): Promise<'settled' | 'rejected' | 'error'> {
-    if (!this.current) return 'error';
+    const job = this.current;
+    if (!job || this.phase !== 'playing' || input.jobId !== job.jobId) return 'error';
+    this.setPhase('settling');
     try {
       const r = await this.deps.finish(input);
-      if (r.status === 200 || r.payload?.settled) {
-        this.clear();
+      if (r.status === 200 && r.payload?.ok !== false && !r.payload?.error
+          && (r.payload?.ok === true || r.payload?.settled === true)) {
+        this.bus.emit('job:settled', { jobId: job.jobId, credited: r.payload.credited !== false });
         return 'settled';
       }
-      if (r.status === 403 || r.payload === null) {
-        this.deps.onSettleFailed(String(r.payload && 'error' in r.payload ? (r.payload as { error?: string }).error : 'rejected'), String(r.error ?? ''));
-      }
-      this.clear();
-      return r.status === 403 ? 'rejected' : 'error';
+      const code = r.error || r.payload?.error || `finish_http_${r.status}`;
+      this.deps.onSettleFailed(code, `结算未确认：${code}`);
+      return r.status >= 400 && r.status < 500 ? 'rejected' : 'error';
     } catch {
-      this.clear();
+      this.deps.onSettleFailed('finish_failed', '结算请求异常，未确认入账');
       return 'error';
+    } finally {
+      if (this.current === job) this.clear();
     }
   }
 
-  /** 主动放弃（30s 无首心跳 / 45s 心跳中断 / 播放器错误） */
+  /** 主动放弃：同一任务只发送一次，结算中不得同时取消。 */
   async abandon(reason: string, detail: string): Promise<void> {
     const job = this.current;
+    if (!job || this.phase !== 'playing') return;
     this.setPhase('abandoning');
     try {
-      if (job) await this.deps.abandon(reason, detail);
+      await this.deps.abandon(reason, detail, job.jobId);
     } finally {
-      this.clear();
+      if (this.current === job) this.clear();
     }
   }
 

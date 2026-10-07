@@ -13,6 +13,7 @@ export interface AuthApi {
   login(): Promise<LoginPayload | null>;                      // 登录由平台页面完成（oauth 回跳携带票据）
   refresh(token: string): Promise<LoginPayload | null>;       // POST /auth/refresh
   me(): Promise<ApiResult<MePayload>>;
+  canRefresh?: boolean;
 }
 
 export class AuthManager {
@@ -91,14 +92,16 @@ export class AuthManager {
     const token = await this.ensureToken();
     if (!token) return;
     const r = await this.api.me();
+    if (token !== this.adapter.storage.getToken()) return; // 保存了新凭证，不应用旧请求结果
     if (r.status === 200 && r.payload) {
+      this.setStatus('valid');
       const p = r.payload;
       const pt = p.participant ?? {};
       const credits = numOr(pt.available_credits, numOr(pt.credits, numOr(p.credits, 0)));
       this.bus.emit('auth:user', { displayName: p.user?.displayName || p.displayName || '', credits });
       this.emitLimitsFrom(p);
     } else if (r.status === 401) {
-      const refreshed = await this.refreshToken();
+      const refreshed = this.api.canRefresh !== false && await this.refreshToken();
       if (!refreshed) this.clearSession();
     }
   }

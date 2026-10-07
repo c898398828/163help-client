@@ -6,7 +6,7 @@
   "scripts": {
     "build": "esbuild src/main.ts --bundle --format=esm --platform=node --outfile=dist/main.js --external:playwright-core",
     "start": "node dist/main.js",
-    "test": "node --test tests/settings.test.ts tests/server.test.ts tests/page.test.ts tests/browser.test.ts tests/api.test.ts tests/transport.test.ts"
+    "test": "node --test tests/*.test.ts"
   },
   "dependencies": {
     "playwright-core": "1.47.0"

@@ -41,8 +41,8 @@ export function createTransport(deps: TransportDeps) {
       return r;
     },
 
-    abandon: async (token: string, reason: string, detail: string) => {
-      await api('POST', '/api/play/abandon', { reason, detail }, token);
+    abandon: async (token: string, reason: string, detail: string, jobId?: string) => {
+      await api('POST', '/api/play/abandon', { jobId, reason, detail }, token);
     },
 
     /** 心跳：附带网易云身份；身份获取失败降级为空身份，不阻塞上报 */

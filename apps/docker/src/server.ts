@@ -74,8 +74,8 @@ export function createStatusServer({ port, state }: { port: number; state: { [k:
             browserReady: state.browserReady === true,
             job: state.job ?? null,
             hbIntervals: state.hbIntervals || [],
-            helpUsed: state.helpUsed || 0, helpLimit: state.helpLimit || 9000,
-            recv: state.recv || 0, recvLimit: state.recvLimit || 26,
+            helpUsed: state.helpUsed || 0, helpLimit: state.helpLimit ?? 9000,
+            recv: state.recv || 0, recvLimit: state.recvLimit ?? 26,
             logs: (state.logs || []).slice(-50),
           })); return;
         }

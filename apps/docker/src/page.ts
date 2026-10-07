@@ -75,6 +75,7 @@ body{
 .hb-bars i{flex:0 0 4px;height:100%;border-radius:2px;background:var(--ok);opacity:.5}
 .hb-bars i.bad{background:var(--warn)}
 .hb-bars i:last-child{opacity:1;animation:barpulse 2s ease-in-out infinite}
+.hb-bars.stale i{animation:none;background:var(--t3)}
 @keyframes barpulse{0%,100%{transform:scaleY(.86)}50%{transform:scaleY(1)}}
 .hb-empty{font-size:11px;color:var(--t3);align-self:center}
 /* 数据卡 */
@@ -316,6 +317,7 @@ function renderNow(d){
   var td=$('tDot');if(td)td.className='dot '+(j?'live':'idle');
 }
 function renderHb(d){
+  $('hbBars').classList.remove('stale');
   var xs=d.hbIntervals||[];
   $('hbAvg').textContent=xs.length?(xs.reduce(function(a,b){return a+b},0)/xs.length/1000).toFixed(1)+'s':'—';
   if(!xs.length){$('hbBars').innerHTML='<span class="hb-empty">暂无心跳 — 开始播放后每 10 秒一次</span>';return}
@@ -326,12 +328,12 @@ function renderHb(d){
   }).join('');
 }
 function renderStats(d){
-  var hl=d.helpLimit||9000, rl=d.recvLimit||26;
+  var hl=d.helpLimit??9000, rl=d.recvLimit??26;
   // 一次性写入整块（含限额），不要事后再取内层 id：innerHTML 替换会销毁旧节点
   $('help').innerHTML=(d.helpUsed||0)+'<span class="u"> / '+hl+'s</span>';
-  $('helpBar').style.width=Math.min(100,(d.helpUsed||0)/hl*100)+'%';
+  $('helpBar').style.width=(hl>0?Math.min(100,(d.helpUsed||0)/hl*100):0)+'%';
   $('recv').innerHTML=(d.recv||0)+'<span class="u"> / '+rl+'次</span>';
-  $('recvBar').style.width=Math.min(100,(d.recv||0)/rl*100)+'%';
+  $('recvBar').style.width=(rl>0?Math.min(100,(d.recv||0)/rl*100):0)+'%';
   $('up').textContent=fmtUp(d.uptime||0);$('footup').textContent=fmtUp(d.uptime||0);
   $('jobsDone').textContent=d.jobsDone||0;
   if(d.configured){
@@ -343,15 +345,34 @@ function renderStats(d){
   }
 }
 function goCfg(){document.querySelector('.nav[data-v=cfg]').click()}
-/* 轮询 */
+/* 轮询：同一时间只有一个请求，超时覆盖响应体读取，失败保留最后一次数据 */
+var pollInFlight=null;
+function markStale(){
+  $('chips').innerHTML=chip('err','状态','连接中断 · 数据已过期');
+  $('nowState').textContent='连接中断 · 数据已过期';
+  $('nowDot').className='dot err';$('tDot').className='dot err';
+  $('sideState').textContent='!';document.title='连接中断 · 互助控制台';
+  $('hbBars').classList.add('stale');
+  ['dg0','dg1','dg2','dg3'].forEach(function(id){$(id).textContent='无法获取最新状态 · 数据已过期'});
+}
 function poll(){
-  fetch('/api/state').then(function(r){
-    if(r.status===401){location.reload();return null}
+  if(pollInFlight)return pollInFlight;
+  var controller=new AbortController(), timer;
+  var request=(async function(){
+    var r=await fetch('/api/state',{signal:controller.signal,cache:'no-store'});
+    if(r.status===401){location.reload();throw new Error('登录已过期')}
+    if(!r.ok)throw new Error('状态请求失败：'+r.status);
     return r.json();
-  }).then(function(d){
-    if(!d)return;lastState=d;
+  })();
+  var timeout=new Promise(function(resolve,reject){timer=setTimeout(function(){
+    controller.abort();reject(new Error('状态请求超时'));
+  },8000)});
+  pollInFlight=Promise.race([request,timeout]).then(function(d){
+    if(!d||typeof d.configured!=='boolean'||typeof d.browserReady!=='boolean'||!Number.isFinite(d.uptime)||!Array.isArray(d.logs)||!Array.isArray(d.hbIntervals))throw new Error('状态响应无效');
     renderChips(d);renderNow(d);renderHb(d);renderStats(d);renderLogs(d);renderDiag(d);
-  }).catch(function(){});
+    lastState=d;return true;
+  }).catch(function(){markStale();return false}).finally(function(){clearTimeout(timer);pollInFlight=null});
+  return pollInFlight;
 }
 function saveCfg(){fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cookie:$('ncookie').value,key:$('nkey').value})}).then(function(r){return r.json().catch(function(){return {}})}).then(function(d){
   if(d.ok){toast('已保存并应用');setTimeout(function(){location.reload()},600)}else toast(d.error||'保存失败',true);
@@ -365,9 +386,9 @@ function renderDiag(d){
   $('dg1').textContent=d.browserReady?'就绪':'未就绪（看日志排查）';
   $('dg2').textContent=d.lastApi?(d.lastApi.ok?'正常 · '+ago(d.lastApi.at):'异常 '+(d.lastApi.status||'')+' · '+ago(d.lastApi.at)):'尚无请求';
   $('dg3').textContent=(d.hbIntervals&&d.hbIntervals.length)?('均值 '+$('hbAvg').textContent):'暂无心跳（未开始播放）';
-  $('dg4').textContent='/data 已挂载（session.json 持久化）';
+  $('dg4').textContent='未验证（请检查 /data 挂载与持久化配置）';
 }
-function diag(){renderDiag(lastState);toast('诊断完成')}
+function diag(){return poll().then(function(ok){toast(ok?'诊断完成':'诊断失败：无法获取最新状态',!ok)})}
 poll(); setInterval(poll,2000);
 </script>` : `
 <div class="dock" style="max-width:400px;margin:8vh auto;min-height:auto">

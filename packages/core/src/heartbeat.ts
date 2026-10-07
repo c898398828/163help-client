@@ -30,6 +30,9 @@ export class HeartbeatEngine {
   private firstAttemptAt = -1; // 首次上报尝试时间（用于「从未成功」时的中断判定）
   private jobId = '';
   private stopped = true;
+  private generation = 0;
+  private inFlight: Promise<void> | null = null;
+  private lastSampleAt = -1;
   private lastProgress = { playedMs: 0, positionMs: 0, durationMs: 0 };
   private opts: { firstHbGraceMs: number; hbStallMs: number; intervalMs: number };
 
@@ -67,7 +70,9 @@ export class HeartbeatEngine {
 
   /** 播放器进度更新（不发请求）：按协议每 intervalMs 由 tick 带上「最近一次进度」上报 */
   update(playedMs: number, positionMs: number, durationMs: number): void {
+    if (this.stopped || ![playedMs, positionMs, durationMs].every(Number.isFinite)) return;
     this.lastProgress = { playedMs, positionMs, durationMs };
+    this.lastSampleAt = Date.now();
   }
 
   /** 立即补报一次（freeze 前等场景）；是否成功以服务端确认为准 */
@@ -77,22 +82,34 @@ export class HeartbeatEngine {
   }
 
   private async flush(): Promise<void> {
-    if (this.stopped || !this.jobId) return;
+    if (this.stopped || !this.jobId || this.lastProgress.playedMs <= 0) return;
+    if (this.inFlight) return this.inFlight;
+    const generation = this.generation;
+    const jobId = this.jobId;
     const p = this.lastProgress;
     if (this.firstAttemptAt < 0) this.firstAttemptAt = Date.now();
-    const ok = await this.api.heartbeat({
-      jobId: this.jobId, playedMs: p.playedMs, positionMs: p.positionMs, durationMs: p.durationMs, monotonic: true,
-    });
-    if (ok) {
-      const now = Date.now();
-      const intervalMs = this.lastAckAt >= 0 ? now - this.lastAckAt : HEARTBEAT_INTERVAL_MS;
-      this.lastAckAt = now; // 只有服务端确认才算「有心跳」
-      this.bus.emit('heartbeat:tick', { jobId: this.jobId, intervalMs, lastAtMs: now });
-    }
+    const request = (async () => {
+      try {
+        const ok = await this.api.heartbeat({ jobId, ...p, monotonic: true });
+        if (!ok || this.stopped || generation !== this.generation) return;
+        const now = Date.now();
+        const intervalMs = this.lastAckAt >= 0 ? now - this.lastAckAt : this.opts.intervalMs;
+        this.lastAckAt = now;
+        this.bus.emit('heartbeat:tick', { jobId, intervalMs, lastAtMs: now });
+      } catch { /* 失败不确认；由首心跳/中断窗口收敛 */ }
+    })();
+    this.inFlight = request;
+    try { await request; }
+    finally { if (generation === this.generation) this.inFlight = null; }
   }
 
   private async tick(): Promise<void> {
     if (this.stopped || !this.jobId) return;
+    if (this.lastSampleAt >= 0 && Date.now() - this.lastSampleAt > this.opts.hbStallMs) {
+      this.stop();
+      this.events.onAbandon('heartbeat_lost', '播放器进度采样已中断，不再重发旧进度');
+      return;
+    }
     if (this.lastProgress.playedMs <= 0) return; // 播放尚未开始：不发 0 进度心跳（与 4.x 一致）
     // 中断判定：以「上次确认」为基准；从未确认过则从首次尝试算起
     const ref = this.lastAckAt >= 0 ? this.lastAckAt : this.firstAttemptAt;
@@ -106,13 +123,16 @@ export class HeartbeatEngine {
 
   private async onResumeLifecycle(): Promise<void> {
     if (this.stopped || !this.jobId) return;
-    // 恢复：tick 会立即续听；事件告知 UI
-    this.bus.emit('heartbeat:tick', { jobId: this.jobId, intervalMs: 0, lastAtMs: Date.now() });
-    this.events.onResume();
+    // 恢复后重新校验时间窗口；不能伪造一条成功心跳。
+    await this.tick();
+    if (!this.stopped) this.events.onResume();
   }
 
   stop(): void {
     this.stopped = true;
+    this.generation++;
+    this.inFlight = null;
+    this.lastSampleAt = -1;
     this.jobId = '';
     this.lastAckAt = -1;
     this.firstAttemptAt = -1;
