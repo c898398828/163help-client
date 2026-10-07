@@ -86,6 +86,15 @@ describe('docker API 传输（版本头 + HMAC 签名）', () => {
     assert.equal(results[0]!.status, 0);
   });
 
+  test('extraHeaders：每次请求附带（如 X-Vip-Type，服务端 /api/me、/api/next 消费）', async () => {
+    const { server, base, seen } = await captureServer();
+    try {
+      const api = createApi({ base, version: '4.0.21', clientType: 'docker', getToken: () => 'k', extraHeaders: () => ({ 'X-Vip-Type': '11' }) });
+      await api('GET', '/api/me');
+      assert.equal(seen[0]!.headers['x-vip-type'], '11');
+    } finally { server.closeAllConnections(); server.close(); }
+  });
+
   test('retryNetwork：连接被重置时自动重试一次（心跳幂等），只上报最终结果', async () => {
     let hits = 0;
     const server = http.createServer((req, res) => {

@@ -105,7 +105,7 @@ export class ClientRuntime {
 
     deps.player.onProgress((playedMs, positionMs, durationMs) => {
       this.job.updateProgress(playedMs);
-      void this.heart.pulse(playedMs, positionMs, durationMs, true);
+      this.heart.update(playedMs, positionMs, durationMs); // 只更新进度：按协议每 10s 由心跳引擎上报一次
       this.trackProgress(playedMs);
       void this.maybeFinish(positionMs, durationMs);
     });

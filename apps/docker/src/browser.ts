@@ -8,20 +8,22 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { chromium } from 'playwright-core';
 
-/** 页内播放器 helper（以字符串注入页面；导出工厂以便单测其进度计算逻辑） */
+/** 页内播放器 helper（以字符串注入页面；导出工厂以便单测其进度与身份解析逻辑） */
 export function createPageHelper(w: Record<string, any>): void {
   let lastDurMs = 0; // 流式音频 duration 常读到 NaN/0：记住上次已知值兜底
+  let identityCache: { id: string; name: string; vipType: number } | null = null;
   const player: {
     audio: HTMLAudioElement | null;
     play(musicId: string | number): Promise<{ ok: boolean; err?: string; durationMs?: number }>;
     progress(): { playedMs: number; durationMs: number };
+    identity(): Promise<{ id: string; name: string; vipType: number }>;
     setRate(r: number): void;
     stop(): void;
   } = {
     audio: null,
     async play(musicId) {
       const id = String(musicId).replace(/^song:/, '');
-      const r = await fetch('/api/song/enhance/player/url?ids=' + encodeURIComponent(JSON.stringify([Number(id)])) + '&br=128000');
+      const r = await w.fetch('/api/song/enhance/player/url?ids=' + encodeURIComponent(JSON.stringify([Number(id)])) + '&br=128000');
       const d = (await r.json()).data?.[0];
       if (!d || !d.url) return { ok: false };
       if (!this.audio) { this.audio = document.createElement('audio'); document.body.appendChild(this.audio); }
@@ -38,6 +40,22 @@ export function createPageHelper(w: Record<string, any>): void {
       if (d > 0) lastDurMs = d;
       // 已播完时把 duration 记为当前进度，让上层能按「歌曲播完」结算（时长未知的流式音频也能收敛）
       return { playedMs, durationMs: a.ended ? playedMs : lastDurMs };
+    },
+    /** 网易云账号身份（服务端心跳据此校验播放账号）；成功才缓存，失败下次重试 */
+    async identity() {
+      if (identityCache) return identityCache;
+      try {
+        const r = await w.fetch('/api/nuser/account/get', { credentials: 'include' });
+        const d = await r.json();
+        const raw = d && d.account && d.account.id != null ? String(d.account.id) : '';
+        const id = /^\d{1,32}$/.test(raw) ? raw : ''; // 服务端只接受纯数字 id
+        const name = d && d.profile && typeof d.profile.nickname === 'string' ? d.profile.nickname : '';
+        const vipType = d && d.account && typeof d.account.vipType === 'number' ? d.account.vipType : 0;
+        if (id) identityCache = { id, name, vipType };
+        return { id, name, vipType };
+      } catch {
+        return { id: '', name: '', vipType: 0 };
+      }
     },
     setRate(r) { if (this.audio) this.audio.playbackRate = r; },
     stop() { if (this.audio) { this.audio.pause(); this.audio.src = ''; } },
@@ -107,6 +125,16 @@ export class DockBrowser {
 
   async progress(): Promise<{ playedMs: number; durationMs: number }> {
     return await this.page.evaluate(() => (window as any).__mhPlayer.progress());
+  }
+
+  /** 网易云账号身份（供心跳/请求头）；页面未就绪或未登录时返回空身份 */
+  async identity(): Promise<{ id: string; name: string; vipType: number }> {
+    try {
+      const r = await this.page.evaluate(() => (window as any).__mhPlayer.identity());
+      return r ?? { id: '', name: '', vipType: 0 };
+    } catch {
+      return { id: '', name: '', vipType: 0 };
+    }
   }
 
   async stop(): Promise<void> {

@@ -10,6 +10,7 @@ import path from 'node:path';
 import { ClientRuntime } from '../../../packages/core/src/index.ts';
 import { DockBrowser } from './browser.ts';
 import { createApi } from './api.ts';
+import { createTransport } from './transport.ts';
 import { createStatusServer } from './server.ts';
 import { applyConfigPatch, type ConfigPatch } from './settings.ts';
 
@@ -86,11 +87,15 @@ function setLastApi(r: { ok: boolean; status: number; at: number; error?: string
   state.lastApiWasOk = r.ok;
 }
 
+/** 网易云会员等级（X-Vip-Type；服务端 /api/me、/api/next 消费）——由页内身份接口刷新 */
+let vipTypeCache = 0;
+
 const api = createApi({
   base: BASE,
   version: CLIENT_VERSION,
   clientType: 'docker',
   getToken: () => storage.getToken(),
+  extraHeaders: () => ({ 'X-Vip-Type': String(vipTypeCache) }),
   onResult: setLastApi,
 });
 
@@ -121,16 +126,16 @@ async function launchBrowser(): Promise<boolean> {
   }
 }
 
-const transport = {
-  next: async (token: string) => api('POST', '/api/next', {}, token),
-  finish: async (token: string, input: unknown) => api('POST', '/api/play/finish', input, token),
-  abandon: async (token: string, reason: string, detail: string) => { await api('POST', '/api/play/abandon', { reason, detail }, token); },
-  heartbeat: async (token: string, input: unknown) => (await api('POST', '/api/play/heartbeat', input, token, { retryNetwork: true })).status === 200, // 心跳幂等：网络抖动自动重试一次
-  refresh: async () => null, // key 凭证不走 session refresh
-  canRefresh: false, // 401 直接停循环（保留已保存密钥），不做刷新重试
-  me: () => api('GET', '/api/me'),
-  sendLog: async (p: unknown) => { await api('POST', '/api/client/log', p); },
-};
+const transport = createTransport({
+  api,
+  // 心跳带上网易云身份（服务端据此校验播放账号）；同时刷新 X-Vip-Type 缓存
+  getIdentity: async () => {
+    if (!browser) return { id: '', name: '', vipType: 0 };
+    const ident = await browser.identity();
+    if (ident.vipType) vipTypeCache = ident.vipType;
+    return ident;
+  },
+});
 
 const player = {
   play: async (musicId: string, durationMs: number) => {

@@ -26,9 +26,11 @@ export interface HeartbeatEvents {
 export class HeartbeatEngine {
   private timer: ReturnType<typeof setInterval> | null = null;
   private graceTimer: ReturnType<typeof setTimeout> | null = null;
-  private lastAt = 0;
+  private lastAckAt = -1; // 上次「成功」心跳（服务端确认）时间；-1 = 尚未成功过（失败不计入，避免掩盖心跳被拒）
+  private firstAttemptAt = -1; // 首次上报尝试时间（用于「从未成功」时的中断判定）
   private jobId = '';
   private stopped = true;
+  private lastProgress = { playedMs: 0, positionMs: 0, durationMs: 0 };
   private opts: { firstHbGraceMs: number; hbStallMs: number; intervalMs: number };
 
   constructor(
@@ -55,35 +57,48 @@ export class HeartbeatEngine {
     this.stopped = false;
     // 首心跳宽限
     this.graceTimer = setTimeout(() => {
-      if (!this.stopped && this.lastAt === 0) {
-        this.events.onAbandon('play_start_fail', `首心跳 30s 内未出现`);
+      if (!this.stopped && this.lastAckAt < 0) {
+        this.stop(); // 只放弃一次：避免后续 tick 重复触发
+        this.events.onAbandon('play_start_fail', `首心跳 30s 内未获服务端确认`);
       }
     }, this.opts.firstHbGraceMs);
     this.timer = setInterval(() => { void this.tick(); }, this.opts.intervalMs);
   }
 
-  /** 播放心跳（播放器回调） */
-  async pulse(playedMs: number, positionMs: number, durationMs: number, monotonic: boolean): Promise<void> {
-    if (this.stopped) return;
-    this.lastAt = Date.now();
-    await this.flush(playedMs, positionMs, durationMs, monotonic);
+  /** 播放器进度更新（不发请求）：按协议每 intervalMs 由 tick 带上「最近一次进度」上报 */
+  update(playedMs: number, positionMs: number, durationMs: number): void {
+    this.lastProgress = { playedMs, positionMs, durationMs };
   }
 
-  private async flush(playedMs = 0, positionMs = 0, durationMs = 0, monotonic = true): Promise<void> {
+  /** 立即补报一次（freeze 前等场景）；是否成功以服务端确认为准 */
+  async pulse(playedMs?: number, positionMs?: number, durationMs?: number): Promise<void> {
+    if (playedMs !== undefined) this.update(playedMs, positionMs ?? playedMs, durationMs ?? 0);
+    await this.flush();
+  }
+
+  private async flush(): Promise<void> {
     if (this.stopped || !this.jobId) return;
+    const p = this.lastProgress;
+    if (this.firstAttemptAt < 0) this.firstAttemptAt = Date.now();
     const ok = await this.api.heartbeat({
-      jobId: this.jobId, playedMs, positionMs, durationMs, monotonic,
+      jobId: this.jobId, playedMs: p.playedMs, positionMs: p.positionMs, durationMs: p.durationMs, monotonic: true,
     });
     if (ok) {
-      this.bus.emit('heartbeat:tick', { jobId: this.jobId, intervalMs: HEARTBEAT_INTERVAL_MS, lastAtMs: Date.now() });
+      const now = Date.now();
+      const intervalMs = this.lastAckAt >= 0 ? now - this.lastAckAt : HEARTBEAT_INTERVAL_MS;
+      this.lastAckAt = now; // 只有服务端确认才算「有心跳」
+      this.bus.emit('heartbeat:tick', { jobId: this.jobId, intervalMs, lastAtMs: now });
     }
   }
 
   private async tick(): Promise<void> {
     if (this.stopped || !this.jobId) return;
-    if (this.lastAt === 0) return; // 首心跳前由 graceTimer 判定
-    if (Date.now() - this.lastAt > this.opts.hbStallMs) {
-      this.events.onAbandon('heartbeat_lost', `距上次心跳 ${Math.round((Date.now() - this.lastAt) / 1000)}s`);
+    if (this.lastProgress.playedMs <= 0) return; // 播放尚未开始：不发 0 进度心跳（与 4.x 一致）
+    // 中断判定：以「上次确认」为基准；从未确认过则从首次尝试算起
+    const ref = this.lastAckAt >= 0 ? this.lastAckAt : this.firstAttemptAt;
+    if (ref >= 0 && Date.now() - ref > this.opts.hbStallMs) {
+      this.stop(); // 只放弃一次：避免后续 tick 重复触发
+      this.events.onAbandon('heartbeat_lost', `距上次有效心跳 ${Math.round((Date.now() - ref) / 1000)}s`);
       return;
     }
     await this.flush();
@@ -99,7 +114,9 @@ export class HeartbeatEngine {
   stop(): void {
     this.stopped = true;
     this.jobId = '';
-    this.lastAt = 0;
+    this.lastAckAt = -1;
+    this.firstAttemptAt = -1;
+    this.lastProgress = { playedMs: 0, positionMs: 0, durationMs: 0 };
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
     if (this.graceTimer) { clearTimeout(this.graceTimer); this.graceTimer = null; }
   }

@@ -21,6 +21,38 @@ describe('DockBrowser.onDisconnect', () => {
   });
 });
 
+describe('页内播放器 helper（网易云身份）', () => {
+  test('identity() 解析 account.id / profile.nickname / vipType', async () => {
+    const w: Record<string, any> = { fetch: async () => ({ json: async () => ({ account: { id: 123456, vipType: 11 }, profile: { nickname: 'CoC' } }) }) };
+    createPageHelper(w);
+    assert.deepEqual(await w.__mhPlayer.identity(), { id: '123456', name: 'CoC', vipType: 11 });
+  });
+
+  test('identity() 请求失败 → 空身份（不抛错），且下次会重试（不缓存失败）', async () => {
+    let calls = 0;
+    const w: Record<string, any> = { fetch: async () => { calls += 1; throw new Error('net'); } };
+    createPageHelper(w);
+    assert.deepEqual(await w.__mhPlayer.identity(), { id: '', name: '', vipType: 0 });
+    await w.__mhPlayer.identity();
+    assert.equal(calls, 2, '失败不应被缓存');
+  });
+
+  test('identity() 成功后缓存，不重复请求', async () => {
+    let calls = 0;
+    const w: Record<string, any> = { fetch: async () => { calls += 1; return { json: async () => ({ account: { id: 42 }, profile: { nickname: 'n' } }) }; } };
+    createPageHelper(w);
+    await w.__mhPlayer.identity();
+    await w.__mhPlayer.identity();
+    assert.equal(calls, 1);
+  });
+
+  test('identity() 非法 id 视为空（服务端只接受数字 id）', async () => {
+    const w: Record<string, any> = { fetch: async () => ({ json: async () => ({ account: { id: 'abc<script>' }, profile: {} }) }) };
+    createPageHelper(w);
+    assert.deepEqual(await w.__mhPlayer.identity(), { id: '', name: '', vipType: 0 });
+  });
+});
+
 describe('页内播放器 helper（进度读取）', () => {
   function makePlayer() {
     const w: Record<string, any> = {};

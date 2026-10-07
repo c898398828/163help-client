@@ -60,6 +60,10 @@ export class JobStateMachine {
       // noTarget / 无单：回 idle（reason 由调用方展示）
       this.setPhase('idle');
       return r.payload ?? null;
+    } catch (e) {
+      // 传输异常（网络重置等）：必须回 idle，否则 phase 卡在 fetching 会「永远不再领单」且无任何日志
+      this.setPhase('idle');
+      throw e;
     } finally {
       this.busy = false;
     }

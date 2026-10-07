@@ -11,6 +11,8 @@ export interface ApiDeps {
   version: string;
   clientType: string;
   getToken: () => string;
+  /** 每次请求附带的额外头（如 X-Vip-Type：服务端 /api/me、/api/next 消费） */
+  extraHeaders?: () => Record<string, string>;
   /** 每次请求结果（供状态条/诊断/日志；网络失败 status=0） */
   onResult?: (r: { ok: boolean; status: number; at: number; error?: string }) => void;
 }
@@ -27,6 +29,7 @@ export function createApi(deps: ApiDeps) {
     const fullUrl = deps.base + path;
     const rawBody = body === undefined ? '' : JSON.stringify(body);
     const headers: Record<string, string> = {
+      ...(deps.extraHeaders?.() ?? {}),
       'Content-Type': 'application/json',
       'X-Client-Type': deps.clientType,
       'X-Music-Helper-Version': deps.version,
