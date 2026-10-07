@@ -35,11 +35,13 @@ const PAGE_HELPER = `
 export class DockBrowser {
   private browser: any = null;
   private page: any = null;
+  private dataDir: string;
+  private cookieHeader: string; // 用户网易云 Cookie（MUSIC_U 等）
 
-  constructor(
-    private dataDir: string,
-    private cookieHeader: string, // 用户网易云 Cookie（MUSIC_U 等）
-  ) {}
+  constructor(dataDir: string, cookieHeader: string) {
+    this.dataDir = dataDir;
+    this.cookieHeader = cookieHeader;
+  }
 
   async launch() {
     const executable = process.env.PW_EXECUTABLE || undefined;
@@ -53,6 +55,11 @@ export class DockBrowser {
     await this.page.goto('https://music.163.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
     await this.applyCookie();
     await this.page.evaluate(PAGE_HELPER);
+  }
+
+  /** 浏览器断开（崩溃/被杀）回调；未启动时安全返回 */
+  onDisconnect(cb: () => void): void {
+    try { this.browser?.on('disconnected', cb); } catch { /* 未启动或无该事件 */ }
   }
 
   /** 更新网易云 Cookie 并重载页面（管理端保存配置后即时生效）；重载会清掉页内播放器，需重新注入 */

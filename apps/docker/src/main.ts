@@ -34,6 +34,9 @@ const state: Record<string, any> = {
   acctName: '',
   configured: Boolean(String(boot.neteaseCookie || '').trim() && String(boot.clientKey || '').trim()),
   browserReady: false,
+  authStatus: '',
+  lastApi: null as { ok: boolean; status: number; at: number } | null,
+  lastApiWasOk: true,
   job: null as { musicName: string; playedMs: number; targetMs: number } | null,
   hbIntervals: [] as number[],
   lastEvent: '',
@@ -60,15 +63,32 @@ const storage = {
   setExpires: () => {},
 };
 
-async function api<T>(method: string, pathName: string, body?: unknown, token = storage.getToken()): Promise<{ status: number; payload: T | null }> {
+/** 记录最近一次服务端请求结果（状态条/诊断用）；状态由好变坏时记一条日志，避免刷屏 */
+function setLastApi(ok: boolean, status: number): void {
+  state.lastApi = { ok, status, at: Date.now() };
+  if (!ok && state.lastApiWasOk !== false) {
+    pushLog('warn', '服务端请求失败（' + (status || '网络不可达') + '），将持续重试');
+  }
+  state.lastApiWasOk = ok;
+}
+
+async function api<T>(method: string, pathName: string, body?: unknown, token = storage.getToken()): Promise<{ status: number; payload: T | null; error?: string }> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-Client-Type': 'docker', 'X-Music-Helper-Version': VERSION };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(BASE + pathName, {
-    method, headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const payload = res.status === 200 ? await res.json().catch(() => null) : null;
-  return { status: res.status, payload };
+  try {
+    const res = await fetch(BASE + pathName, {
+      method, headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    setLastApi(res.status < 500, res.status);
+    const payload = res.status === 200 ? await res.json().catch(() => null) : null;
+    return { status: res.status, payload };
+  } catch (e) {
+    // 网络异常不抛出：返回 status 0，由主循环按重试节奏继续（避免未处理拒绝打挂进程）
+    const msg = e instanceof Error ? e.message : String(e);
+    setLastApi(false, 0);
+    return { status: 0, payload: null, error: 'network: ' + msg };
+  }
 }
 
 let browser: DockBrowser | null = null;
@@ -81,6 +101,13 @@ async function launchBrowser(): Promise<boolean> {
     await b.launch();
     browser = b;
     state.browserReady = true;
+    b.onDisconnect(() => {
+      if (browser !== b) return; // 已被新实例替换
+      browser = null;
+      state.browserReady = false;
+      pushLog('error', '浏览器已断开（崩溃或被杀），5 秒后自动重连');
+      setTimeout(() => { if (!browser) void launchBrowser(); }, 5000);
+    });
     pushLog('info', '浏览器已就绪');
     return true;
   } catch (e) {
@@ -128,7 +155,10 @@ runtime.bus.on('job:current', (j) => {
 runtime.bus.on('job:progress', (p) => { if (state.job) state.job.playedMs = p.playedMs; });
 runtime.bus.on('heartbeat:tick', (t) => { state.hbIntervals.push(t.intervalMs); if (state.hbIntervals.length > 30) state.hbIntervals.shift(); });
 runtime.bus.on('auth:user', (u) => { state.acctName = u ? u.displayName : ''; });
-runtime.bus.on('auth:status', (s) => { if (s === 'logged_out') pushLog('warn', '凭证已失效（或密钥有误），请在「设置」重新填写'); });
+runtime.bus.on('auth:status', (s) => {
+  state.authStatus = s;
+  if (s === 'logged_out') pushLog('warn', '凭证已失效（或密钥有误），请在「设置」重新填写');
+});
 runtime.bus.on('limits:updated', (s) => {
   state.helpUsed = s.helpedToday; state.helpLimit = s.helpedLimit;
   state.recv = s.receivedToday; state.recvLimit = s.receivedLimit;

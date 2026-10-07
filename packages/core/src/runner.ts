@@ -105,7 +105,9 @@ export class ClientRuntime {
     });
 
     // UI 镜像事件
-    this.bus.on('job:current', (j: CurrentJob | null) => { if (j) this.log.push('info', 'job_start', j.musicName); });
+    this.bus.on('job:current', (j: CurrentJob | null) => {
+      if (j) this.log.push('info', 'job_start', `本单开始：${j.musicId}（目标 ${Math.round(j.targetMs / 1000)}s）`);
+    });
   }
 
   async start(autostart: boolean): Promise<void> {
@@ -121,6 +123,7 @@ export class ClientRuntime {
   private finishing = false;
   private authFailed = false;
   private lastNoTargetReason = '';
+  private lastCycleError = '';
 
   /** 401 处理：标记循环停止；支持 refresh 的端（油猴/扩展 session）再走刷新重试 */
   private on401(status: number): void {
@@ -156,15 +159,25 @@ export class ClientRuntime {
           this.log.push('warn', 'cycle_stop', '凭证失效，停止领单循环（重新保存配置后自动恢复）');
           return;
         }
-        const p = await this.job.fetchNext();
-        if (p && p.noTargetReason) {
-          const reason = String(p.noTargetReason);
-          if (reason !== this.lastNoTargetReason) { // 去重：避免每 3s 刷同一条
-            this.lastNoTargetReason = reason;
-            this.log.push('info', 'no_target', reason);
+        try {
+          const p = await this.job.fetchNext();
+          if (p && p.noTargetReason) {
+            const reason = String(p.noTargetReason);
+            if (reason !== this.lastNoTargetReason) { // 去重：避免每 3s 刷同一条
+              this.lastNoTargetReason = reason;
+              this.log.push('info', 'no_target', reason);
+            }
+          } else if (p) {
+            this.lastNoTargetReason = '';
           }
-        } else if (p) {
-          this.lastNoTargetReason = '';
+          this.lastCycleError = '';
+        } catch (e) {
+          // 网络抖动/传输异常不致命：记一条（同因去重）后按节奏重试，绝不让循环因未处理拒绝而中断
+          const msg = '领单请求异常：' + String(e);
+          if (msg !== this.lastCycleError) {
+            this.lastCycleError = msg;
+            this.log.push('warn', 'cycle_error', msg);
+          }
         }
         await sleep(3000);
       }
