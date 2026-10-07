@@ -74,6 +74,9 @@ export class ClientRuntime {
       },
       onPlaying: (job) => {
         this.heart.start(job.jobId);
+        this.lastAdvanceMs = -1;
+        this.lastAdvanceAt = -1;
+        this.stallReported = false;
         void this.deps.player.play(job.musicId, job.targetMs, '').then((ok) => {
           if (!ok) this.failStart(job.jobId, '播放器加载失败');
         }).catch((e) => this.failStart(job.jobId, '播放器异常：' + String(e)));
@@ -101,6 +104,7 @@ export class ClientRuntime {
     deps.player.onProgress((playedMs, positionMs, durationMs) => {
       this.job.updateProgress(playedMs);
       void this.heart.pulse(playedMs, positionMs, durationMs, true);
+      this.trackProgress(playedMs);
       void this.maybeFinish(positionMs, durationMs);
     });
 
@@ -124,6 +128,29 @@ export class ClientRuntime {
   private authFailed = false;
   private lastNoTargetReason = '';
   private lastCycleError = '';
+  private lastAdvanceMs = -1; // 上次进度前移时的 playedMs（-1 = 本单尚无进度）
+  private lastAdvanceAt = -1;
+  private stallReported = false;
+
+  /** 卡死判定（对齐 4.x 的 playback_stalled）：播放中进度 PLAYBACK_STALL_MS 未前移 → 放弃本单，避免永久挂着 */
+  private trackProgress(playedMs: number): void {
+    if (!this.job.current || this.finishing) return;
+    const now = Date.now();
+    if (this.lastAdvanceAt < 0) { this.lastAdvanceAt = now; this.lastAdvanceMs = playedMs; return; }
+    if (playedMs > this.lastAdvanceMs) {
+      this.lastAdvanceMs = playedMs;
+      this.lastAdvanceAt = now;
+      this.stallReported = false;
+      return;
+    }
+    if (this.lastAdvanceMs > 0 && now - this.lastAdvanceAt >= PLAYBACK_STALL_MS && !this.stallReported) {
+      this.stallReported = true;
+      this.heart.stop();
+      this.log.push('warn', 'playback_stalled', `播放进度停滞 ${Math.round((now - this.lastAdvanceAt) / 1000)}s（疑似试听卡死），放弃本单领下一单`);
+      void this.job.abandon('playback_stalled', `进度 ${Math.round(playedMs / 1000)}s 停滞`);
+      this.deps.player.stop();
+    }
+  }
 
   /** 401 处理：标记循环停止；支持 refresh 的端（油猴/扩展 session）再走刷新重试 */
   private on401(status: number): void {
@@ -162,7 +189,7 @@ export class ClientRuntime {
         try {
           const p = await this.job.fetchNext();
           if (p && p.noTargetReason) {
-            const reason = String(p.noTargetReason);
+            const reason = formatNoTarget(p.noTargetReason);
             if (reason !== this.lastNoTargetReason) { // 去重：避免每 3s 刷同一条
               this.lastNoTargetReason = reason;
               this.log.push('info', 'no_target', reason);
@@ -226,3 +253,23 @@ export class ClientRuntime {
 }
 
 function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)); }
+
+/** 播放进度停滞阈值（与 4.x 客户端一致：40s 不动判定试听卡死） */
+const PLAYBACK_STALL_MS = 40_000;
+
+/** 服务端 noTargetReason 是对象摘要（与 4.x 客户端一致：{reason, participants, active, withAvailableCredit}）：
+ *  渲染为可读文案；字符串原样返回。修复「String(对象) → [object Object]」日志。 */
+function formatNoTarget(r: unknown): string {
+  if (typeof r === 'string') return r;
+  if (!r || typeof r !== 'object') return '暂无可互助目标';
+  const s = r as { reason?: unknown; participants?: unknown; active?: unknown; withAvailableCredit?: unknown };
+  const reason = String(s.reason ?? '');
+  if (reason === 'resting') return '已连续播放较久，正在随机休息，稍后自动恢复';
+  if (reason === 'daily_limit') return '今日帮助次数已达上限，明天再来';
+  const n = (v: unknown): number => Number(v) || 0;
+  const parts: string[] = [];
+  if (n(s.participants) > 0) parts.push(`参与者 ${n(s.participants)}`);
+  if (n(s.active) > 0) parts.push(`在线 ${n(s.active)}`);
+  if (n(s.withAvailableCredit) > 0) parts.push(`有额度 ${n(s.withAvailableCredit)}`);
+  return '暂无可互助目标' + (parts.length ? `（${parts.join(' / ')}）` : '');
+}

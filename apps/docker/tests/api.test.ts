@@ -85,4 +85,26 @@ describe('docker API 传输（版本头 + HMAC 签名）', () => {
     assert.equal(results[0]!.ok, false);
     assert.equal(results[0]!.status, 0);
   });
+
+  test('retryNetwork：连接被重置时自动重试一次（心跳幂等），只上报最终结果', async () => {
+    let hits = 0;
+    const server = http.createServer((req, res) => {
+      hits += 1;
+      if (hits === 1) { req.socket.destroy(); return; } // 模拟 ECONNRESET
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const { port } = server.address() as AddressInfo;
+    try {
+      const results: Array<{ ok: boolean; status: number }> = [];
+      const api = createApi({ base: `http://127.0.0.1:${port}`, version: '4.0.21', clientType: 'docker', getToken: () => 'k', onResult: (r) => results.push(r) });
+      const r = await api('POST', '/api/play/heartbeat', {}, undefined, { retryNetwork: true });
+      assert.equal(r.status, 200);
+      assert.equal(hits, 2, '应发生一次重试');
+      assert.equal(results.length, 1, '只上报最终结果（中间失败不上报，避免日志噪音）');
+      assert.equal(results[0]!.ok, true);
+    } finally { server.closeAllConnections(); server.close(); }
+  });
 });

@@ -8,8 +8,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { chromium } from 'playwright-core';
 
-const PAGE_HELPER = `
-  window.__mhPlayer = {
+/** 页内播放器 helper（以字符串注入页面；导出工厂以便单测其进度计算逻辑） */
+export function createPageHelper(w: Record<string, any>): void {
+  let lastDurMs = 0; // 流式音频 duration 常读到 NaN/0：记住上次已知值兜底
+  const player: {
+    audio: HTMLAudioElement | null;
+    play(musicId: string | number): Promise<{ ok: boolean; err?: string; durationMs?: number }>;
+    progress(): { playedMs: number; durationMs: number };
+    setRate(r: number): void;
+    stop(): void;
+  } = {
     audio: null,
     async play(musicId) {
       const id = String(musicId).replace(/^song:/, '');
@@ -25,12 +33,20 @@ const PAGE_HELPER = `
     progress() {
       const a = this.audio;
       if (!a) return { playedMs: 0, durationMs: 0 };
-      return { playedMs: Math.round(a.currentTime * 1000), durationMs: Math.round((a.duration || 0) * 1000) };
+      const playedMs = Math.round(a.currentTime * 1000);
+      const d = Math.round((Number(a.duration) || 0) * 1000);
+      if (d > 0) lastDurMs = d;
+      // 已播完时把 duration 记为当前进度，让上层能按「歌曲播完」结算（时长未知的流式音频也能收敛）
+      return { playedMs, durationMs: a.ended ? playedMs : lastDurMs };
     },
     setRate(r) { if (this.audio) this.audio.playbackRate = r; },
     stop() { if (this.audio) { this.audio.pause(); this.audio.src = ''; } },
   };
-`;
+  w.__mhPlayer = player;
+}
+
+/** 注入页面的源码（由工厂函数序列化，保证与单测逻辑同源） */
+export const PAGE_HELPER = `(${createPageHelper.toString()})(window);`;
 
 export class DockBrowser {
   private browser: any = null;

@@ -47,7 +47,16 @@ export interface NextPayload {
   requiredListenRatio?: number;
   owner?: { displayName?: string };
   participant?: Participant;
-  noTargetReason?: string | null;
+  noTargetReason?: NoTargetSummary | string | null;
+}
+
+/** 无单原因摘要（服务端对象形态；4.x 客户端有同款渲染） */
+export interface NoTargetSummary {
+  reason?: string; // resting / daily_limit / …
+  participants?: number;
+  notSelf?: number;
+  active?: number;
+  withAvailableCredit?: number;
 }
 
 export interface Participant {

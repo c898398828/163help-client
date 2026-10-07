@@ -23,7 +23,7 @@ export interface ApiResponse<T> {
 }
 
 export function createApi(deps: ApiDeps) {
-  return async function api<T>(method: string, path: string, body?: unknown, token = deps.getToken()): Promise<ApiResponse<T>> {
+  async function request<T>(method: string, path: string, body: unknown, token: string, report: boolean): Promise<ApiResponse<T>> {
     const fullUrl = deps.base + path;
     const rawBody = body === undefined ? '' : JSON.stringify(body);
     const headers: Record<string, string> = {
@@ -40,13 +40,24 @@ export function createApi(deps: ApiDeps) {
       const error = res.status !== 200 && parsed && typeof parsed === 'object' && 'error' in parsed
         ? String((parsed as { error: unknown }).error)
         : undefined;
-      deps.onResult?.({ ok: res.status < 400, status: res.status, at: Date.now(), error });
+      if (report) deps.onResult?.({ ok: res.status < 400, status: res.status, at: Date.now(), error });
       return { status: res.status, payload: res.status === 200 ? (parsed as T) : null, error };
     } catch (e) {
       const cause = (e as { cause?: { code?: string } }).cause?.code;
       const msg = (e instanceof Error ? e.message : String(e)) + (cause ? `（${cause}）` : '');
-      deps.onResult?.({ ok: false, status: 0, at: Date.now(), error: msg });
+      if (report) deps.onResult?.({ ok: false, status: 0, at: Date.now(), error: msg });
       return { status: 0, payload: null, error: 'network: ' + msg };
     }
+  }
+
+  /** opts.retryNetwork：连接被重置等网络层失败时重试一次（仅用于幂等请求，如心跳）；只上报最终结果 */
+  return async function api<T>(method: string, path: string, body?: unknown, token = deps.getToken(), opts?: { retryNetwork?: boolean }): Promise<ApiResponse<T>> {
+    const retry = opts?.retryNetwork === true;
+    const first = await request<T>(method, path, body, token, !retry);
+    if (retry && first.status === 0) {
+      await new Promise((r) => setTimeout(r, 800));
+      return request<T>(method, path, body, token, true);
+    }
+    return first;
   };
 }

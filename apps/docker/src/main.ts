@@ -70,8 +70,9 @@ const CLIENT_VERSION = process.env.CLIENT_VERSION || '4.0.21';
 
 /** 记录最近一次服务端请求结果（状态条/诊断用）；状态由好变坏时记一条日志，避免刷屏 */
 function setLastApi(r: { ok: boolean; status: number; at: number; error?: string }): void {
+  const wasOk = state.lastApiWasOk;
   state.lastApi = { ok: r.ok, status: r.status, at: r.at };
-  if (!r.ok && state.lastApiWasOk !== false) {
+  if (!r.ok && wasOk !== false) {
     if (r.status === 403 && r.error === 'client_upgrade_required') {
       pushLog('error', `服务端要求升级客户端（403 client_upgrade_required）：上报版本 ${CLIENT_VERSION} 不被接受`);
     } else if (r.status === 0) {
@@ -80,6 +81,7 @@ function setLastApi(r: { ok: boolean; status: number; at: number; error?: string
       pushLog('warn', `服务端请求失败（${r.status}${r.error ? ' ' + r.error : ''}），将持续重试`);
     }
   }
+  if (r.ok && wasOk === false) pushLog('info', '服务端连接已恢复');
   state.lastApiWasOk = r.ok;
 }
 
@@ -122,7 +124,7 @@ const transport = {
   next: async (token: string) => api('POST', '/api/next', {}, token),
   finish: async (token: string, input: unknown) => api('POST', '/api/play/finish', input, token),
   abandon: async (token: string, reason: string, detail: string) => { await api('POST', '/api/play/abandon', { reason, detail }, token); },
-  heartbeat: async (token: string, input: unknown) => (await api('POST', '/api/play/heartbeat', input, token)).status === 200,
+  heartbeat: async (token: string, input: unknown) => (await api('POST', '/api/play/heartbeat', input, token, { retryNetwork: true })).status === 200, // 心跳幂等：网络抖动自动重试一次
   refresh: async () => null, // key 凭证不走 session refresh
   canRefresh: false, // 401 直接停循环（保留已保存密钥），不做刷新重试
   me: () => api('GET', '/api/me'),
