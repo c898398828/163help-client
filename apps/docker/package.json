@@ -5,7 +5,8 @@
   "private": true,
   "scripts": {
     "build": "esbuild src/main.ts --bundle --format=esm --platform=node --outfile=dist/main.js --external:playwright-core",
-    "start": "node dist/main.js"
+    "start": "node dist/main.js",
+    "test": "node --test tests/settings.test.ts tests/server.test.ts"
   },
   "dependencies": {
     "playwright-core": "1.47.0"

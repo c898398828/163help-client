@@ -124,7 +124,7 @@ ${isAuthed ? `
         <label>Portal 客户端密钥（mh_ck_ 开头，个人中心获取）</label>
         <input id="nkey" placeholder="mh_ck_xxxxxxxx"/>
         <div style="margin-top:14px"><button onclick="saveCfg()">保存并应用</button><button class="btn-ghost" onclick="clearCfg()">清除配置</button></div>
-        <div class="tip">保存后自动重启会话生效；数据持久化于 /data（升级不丢）。忘记密码 ./vps-setup.sh show-password 找回。</div>
+        <div class="tip">保存后自动重启会话生效；数据持久化于 /data（升级不丢）。留空的输入不会覆盖已保存值（要清空请用「清除配置」）。忘记密码 ./vps-setup.sh show-password 找回。</div>
       </div>
     </div>
 
@@ -152,10 +152,11 @@ document.querySelectorAll('.nav').forEach(n=>n.onclick=()=>{
   ['overview','task','log','cfg','diag'].forEach(v=>$('view-'+v).classList.toggle('hidden',v!==n.dataset.v));
 });
 /* 总览轮询 */
+let lastState={};
 async function poll(manual){
   try{
     const r=await fetch('/api/state'); if(r.status===401){location.reload();return}
-    const d=await r.json();
+    const d=await r.json(); lastState=d;
     $('help').innerHTML=(d.helpUsed||0)+'<span class="u"> / <b>'+((d.helpLimit||9000))+'</b>s</span>';
     $('helpBar').style.width=Math.min(100,(d.helpLimit?(d.helpUsed||0)/d.helpLimit:0)*100)+'%';
     $('recv').innerHTML=(d.recv||0)+'<span class="u"> / <b>'+(d.recvLimit||26)+'</b>次</span>';
@@ -177,14 +178,16 @@ async function poll(manual){
     if(manual)toast('已刷新');
   }catch(e){}
 }
-async function saveCfg(){const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cookie:$('ncookie').value,key:$('nkey').value})});if((await r.json()).ok){toast('已保存并应用');setTimeout(()=>location.reload(),600)}else toast('保存失败',false)}
-async function clearCfg(){if(!confirm('确认清除配置？'))return;const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clear:true})});if((await r.json()).ok){toast('已清除');setTimeout(()=>location.reload(),600)}}
+async function saveCfg(){const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cookie:$('ncookie').value,key:$('nkey').value})});const d=await r.json().catch(()=>({}));if(d.ok){toast('已保存并应用');setTimeout(()=>location.reload(),600)}else toast(d.error||'保存失败',false)}
+async function clearCfg(){if(!confirm('确认清除配置？'))return;const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clear:true})});const d=await r.json().catch(()=>({}));if(d.ok){toast('已清除');setTimeout(()=>location.reload(),600)}else toast(d.error||'清除失败',false)}
 async function doLogout(){await fetch('/api/logout',{method:'POST'});location.reload()}
 function copyDiag(){const t=new Date().toISOString();navigator.clipboard.writeText(JSON.stringify({at:t,log:$('fullLog').innerText}));toast('诊断信息已复制')}
 async function diag(){
-  $('dg0').textContent='容器正常'; $('dg1').textContent='浏览器正常';
+  $('dg0').textContent='容器正常';
+  $('dg1').textContent=lastState.browserReady?'浏览器就绪':'浏览器未就绪（看日志排查）';
   try{const r=await fetch('https://163music.linyu.qzz.io/api/me');$('dg2').textContent='API 可达 ('+r.status+')'}catch(e){$('dg2').textContent='不可达'}
-  $('dg3').textContent='正常（均值 '+($('hbAvg').textContent||'—')+'）'; $('dg4').textContent='/data 已挂载'; toast('诊断完成');
+  $('dg3').textContent=(lastState.hbIntervals&&lastState.hbIntervals.length)?('正常（均值 '+($('hbAvg').textContent||'—')+'）'):'暂无心跳（未开始播放）';
+  $('dg4').textContent='/data 已挂载'; toast('诊断完成');
 }
 poll(); setInterval(()=>poll(false),2000);
 </script>` : `

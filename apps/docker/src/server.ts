@@ -46,28 +46,50 @@ export function createStatusServer({ port, state }: { port: number; state: { [k:
       if (req.method === 'GET' && req.url === '/') {
         const cookieAuthed = tokenOK(cookieVal(req.headers.cookie, 'mh_ui'));
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(buildPage({ authed: cookieAuthed }));
+        res.end(buildPage({ authed: cookieAuthed, configured: state.configured === true }));
         return;
       }
       if (req.url?.startsWith('/api/')) {
-        const okAuth = tokenOK(cookieVal(req.headers.cookie, 'mh_ui')) ||
-          tokenOK((req.headers['x-ui-token'] || '') as string);
-        if (!okAuth) { res.writeHead(401); res.end(JSON.stringify({ error: 'unauthorized' })); return; }
+        const cookieTok = cookieVal(req.headers.cookie, 'mh_ui');
+        const headerTok = String(req.headers['x-ui-token'] || '');
+        const uiTok = tokenOK(cookieTok) ? cookieTok : (tokenOK(headerTok) ? headerTok : '');
+        if (!uiTok) { res.writeHead(401); res.end(JSON.stringify({ error: 'unauthorized' })); return; }
+
+        if (req.method === 'POST' && req.url === '/api/logout') {
+          sessions.delete(uiTok);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true })); return;
+        }
         if (req.method === 'GET' && req.url === '/api/state') {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({
-            uptime: Math.floor((Date.now() - state.startedAt) / 1000),
+            uptime: Math.floor((Date.now() - Number(state.startedAt || Date.now())) / 1000),
             version: '5.1',
-            job: state.job, hbIntervals: state.hbIntervals,
-            helpUsed: state.helpUsed, helpLimit: state.helpLimit,
-            recv: state.recv, recvLimit: state.recvLimit,
-            logs: state.logs.slice(-50),
+            configured: state.configured === true,
+            acctName: state.acctName || '',
+            jobsDone: state.jobsDone || 0,
+            browserReady: state.browserReady === true,
+            job: state.job ?? null,
+            hbIntervals: state.hbIntervals || [],
+            helpUsed: state.helpUsed || 0, helpLimit: state.helpLimit || 9000,
+            recv: state.recv || 0, recvLimit: state.recvLimit || 26,
+            logs: (state.logs || []).slice(-50),
           })); return;
         }
         if (req.method === 'POST' && req.url === '/api/config') {
+          // 必须真写盘：未注册 onConfig 或写入失败一律不返回 ok（曾经假报成功导致「保存了但不工作」）
+          if (typeof state.onConfig !== 'function') {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: '配置保存未就绪（服务端未注册 onConfig）' })); return;
+          }
           const c = JSON.parse((await body()) || '{}');
-          if (state.onConfig) state.onConfig(c);
-          res.writeHead(200); res.end(JSON.stringify({ ok: true })); return;
+          const r = await state.onConfig(c); // 抛错（写盘失败）→ 外层 catch 返回 500
+          if (r && r.error) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: r.error })); return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, saved: (r && r.saved) || [] })); return;
         }
       }
       res.writeHead(404); res.end('nf');

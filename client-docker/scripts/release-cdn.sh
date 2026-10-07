@@ -7,7 +7,7 @@ set -euo pipefail
 
 TAG="${1:-latest}"
 PUBLIC_DIR="${2:-/opt/music-help/script-release/public}"
-IMG="ghcr.io/y08lin4/163music-help/docker-client:${TAG}"
+IMG="ghcr.io/y08lin4/163help-client/docker-client:${TAG}"
 OUT_DIR="${PUBLIC_DIR}/docker"
 OUT_FILE="163music-docker-client-${TAG}.tar.gz"
 

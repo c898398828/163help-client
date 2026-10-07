@@ -11,3 +11,7 @@ apps/extension/content.bundle.js
 .env
 *.local
 .npm-cache/
+packages/core/src/dispatch.ts
+apps/docker/tests/server.test.ts
+apps/docker/tests/settings.test.ts
+packages/core/tests/runner.test.ts

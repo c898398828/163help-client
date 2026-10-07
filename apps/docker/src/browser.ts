@@ -51,7 +51,21 @@ export class DockBrowser {
     this.page = await this.browser.newPage({ userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36' });
     await this.page.setExtraHTTPHeaders({});
     await this.page.goto('https://music.163.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
-    // 注入网易云 cookie（同源）
+    await this.applyCookie();
+    await this.page.evaluate(PAGE_HELPER);
+  }
+
+  /** 更新网易云 Cookie 并重载页面（管理端保存配置后即时生效）；重载会清掉页内播放器，需重新注入 */
+  async setCookie(cookieHeader: string): Promise<void> {
+    this.cookieHeader = cookieHeader;
+    if (!this.page) return;
+    await this.applyCookie();
+    await this.page.evaluate(PAGE_HELPER);
+  }
+
+  /** 应用当前 Cookie（先清空，避免旧登录态残留）并重载首页 */
+  private async applyCookie(): Promise<void> {
+    await this.page.context().clearCookies();
     if (this.cookieHeader) {
       for (const pair of this.cookieHeader.split(';')) {
         const [k, ...v] = pair.trim().split('=');
@@ -59,9 +73,8 @@ export class DockBrowser {
           await this.page.context().addCookies([{ name: k.trim(), value: v.join('=').trim(), domain: '.music.163.com', path: '/' }]);
         }
       }
-      await this.page.reload({ waitUntil: 'domcontentloaded' });
     }
-    await this.page.evaluate(PAGE_HELPER);
+    await this.page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
   }
 
   async play(musicId: string, _durationMs: number): Promise<boolean> {

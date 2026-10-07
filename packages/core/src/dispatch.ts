@@ -11,13 +11,15 @@ export interface DispatchDeps {
   finish(input: FinishInput): Promise<ApiResult<{ settled?: boolean }>>;
   abandon(reason: string, detail: string): Promise<void>;
   /** 播放开始回调：由 UI/播放器拉起心跳 */
-  onPlaying(job: { jobId: string; musicName: string; targetMs: number }): void;
+  onPlaying(job: CurrentJob): void;
   /** 结算失败提示（403/过期等）——明示「无心跳未结算，请重新听」 */
   onSettleFailed(code: string, msg: string): void;
 }
 
 export interface CurrentJob {
   jobId: string;
+  /** 可播放的音乐 id（song:xxx / 数字），播放器必须用它，不要用展示名 */
+  musicId: string;
   musicName: string;
   targetMs: number;
   playedMs: number;
@@ -45,7 +47,8 @@ export class JobStateMachine {
       if (r.status === 200 && r.payload && r.payload.jobId && r.payload.musicId) {
         this.current = {
           jobId: r.payload.jobId,
-          musicName: r.payload.owner?.displayName ? '' : String(r.payload.musicId),
+          musicId: String(r.payload.musicId),
+          musicName: String(r.payload.musicId),
           targetMs: r.payload.targetDurationMs ?? 0,
           playedMs: 0,
         };

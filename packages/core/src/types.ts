@@ -122,7 +122,7 @@ export interface CoreEventMap {
   'auth:status': AuthStatus;
   'auth:user': { displayName: string; credits: number } | null;
   'job:phase': JobPhase;
-  'job:current': { jobId: string; musicName: string; targetMs: number; playedMs: number } | null;
+  'job:current': { jobId: string; musicId: string; musicName: string; targetMs: number; playedMs: number } | null;
   'job:progress': { jobId: string; playedMs: number; positionMs: number };
   'heartbeat:tick': { jobId: string; intervalMs: number; lastAtMs: number };
   'limits:updated': LimitsPayload;
