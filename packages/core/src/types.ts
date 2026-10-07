@@ -117,9 +117,38 @@ export interface LimitsPayload {
 }
 
 /** /api/me 返回（限额字段可选，缺失时由 core 用 stats 推算兜底） */
+/** /api/me 真实结构：{ user: { displayName, song_slot_limit }, participant: { …snake_case 额度字段 } } */
+export interface MeUser {
+  displayName?: string;
+  song_slot_limit?: number;
+  [k: string]: unknown;
+}
+
+/** participant 额度字段（v5 秒闸 help_seconds_* 优先，缺失降级到次数） */
+export interface ParticipantInfo {
+  available_credits?: number;
+  credits?: number;
+  today_helped_count?: number;
+  today_helped_limit?: number;
+  today_received_help_count?: number;
+  today_received_limit?: number;
+  received_finished_count_24h?: number;
+  monthly_received_help_count?: number;
+  monthly_received_limit?: number;
+  help_seconds_limit?: number;
+  help_seconds_used?: number;
+  remaining_help_seconds?: number;
+  monthly_cap_reached?: boolean;
+  song_slot_limit?: number;
+  [k: string]: unknown;
+}
+
 export interface MePayload {
-  displayName: string;
-  credits: number;
+  user?: MeUser;
+  participant?: ParticipantInfo;
+  /** 兼容：简版响应可能直接给顶层字段 */
+  displayName?: string;
+  credits?: number;
   helpedToday?: number;
   helpedLimit?: number;
   receivedToday?: number;

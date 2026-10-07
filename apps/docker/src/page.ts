@@ -336,7 +336,7 @@ function renderStats(d){
   $('jobsDone').textContent=d.jobsDone||0;
   if(d.configured){
     $('acct').textContent=d.acctName||'密钥模式';
-    $('acctInfo').textContent=d.acctName?'已登录':'凭证已配置';
+    $('acctInfo').textContent=(d.acctName?'已登录':'凭证已配置')+(d.credits?' · 额度 '+d.credits:'');
   }else{
     $('acct').textContent='未配置';
     $('acctInfo').innerHTML='<a onclick="goCfg()">去设置粘贴 Cookie 与密钥</a>';

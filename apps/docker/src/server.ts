@@ -67,6 +67,7 @@ export function createStatusServer({ port, state }: { port: number; state: { [k:
             version: '5.1',
             configured: state.configured === true,
             acctName: state.acctName || '',
+            credits: state.credits || 0,
             authStatus: state.authStatus || '',
             lastApi: state.lastApi ?? null,
             jobsDone: state.jobsDone || 0,

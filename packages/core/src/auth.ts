@@ -92,33 +92,30 @@ export class AuthManager {
     if (!token) return;
     const r = await this.api.me();
     if (r.status === 200 && r.payload) {
-      this.bus.emit('auth:user', { displayName: r.payload.displayName, credits: r.payload.credits });
-      this.emitLimitsFrom(r.payload);
+      const p = r.payload;
+      const pt = p.participant ?? {};
+      const credits = numOr(pt.available_credits, numOr(pt.credits, numOr(p.credits, 0)));
+      this.bus.emit('auth:user', { displayName: p.user?.displayName || p.displayName || '', credits });
+      this.emitLimitsFrom(p);
     } else if (r.status === 401) {
       const refreshed = await this.refreshToken();
       if (!refreshed) this.clearSession();
     }
   }
 
-  /** B5：me() 成功回调后发射 limits:updated（仅在数值变化时）。me() 无限额字段则用 stats.ts 推算兜底 */
+  /** me() 成功回调后发射 limits:updated（仅在数值变化时）
+   *  真实字段（participant，snake_case）：help_seconds_used/help_seconds_limit（v5 秒闸）优先，
+   *  缺失时降级到 today_helped_count / today_helped_limit；被助取 received_finished_count_24h / today_received_* */
   private lastLimitsKey = '';
   private emitLimitsFrom(p: MePayload): void {
-    const hasReal = [p.helpedToday, p.helpedLimit, p.receivedToday, p.receivedLimit].some((v) => typeof v === 'number');
-    // 兜底：无真实限额时按「代表性 300s 歌」推算 = 9000s（与面板/快照/docker 默认一致）
-    const fallbackLimit = helpSecondsLimit(300);
-    const limits: LimitsPayload = hasReal
-      ? {
-        helpedToday: p.helpedToday ?? 0,
-        helpedLimit: p.helpedLimit ?? fallbackLimit,
-        receivedToday: p.receivedToday ?? 0,
-        receivedLimit: p.receivedLimit ?? 26,
-      }
-      : {
-        helpedToday: 0,
-        helpedLimit: fallbackLimit,
-        receivedToday: 0,
-        receivedLimit: 26,
-      };
+    const pt = p.participant ?? {};
+    const fallbackLimit = helpSecondsLimit(300); // 兜底 = 9000s（代表性 300s 歌）
+    const limits: LimitsPayload = {
+      helpedToday: numOr(pt.help_seconds_used, numOr(pt.today_helped_count, numOr(p.helpedToday, 0))),
+      helpedLimit: numOr(pt.help_seconds_limit, numOr(pt.today_helped_limit, numOr(p.helpedLimit, fallbackLimit))),
+      receivedToday: numOr(pt.received_finished_count_24h, numOr(pt.today_received_help_count, numOr(p.receivedToday, 0))),
+      receivedLimit: numOr(pt.today_received_limit, numOr(p.receivedLimit, 26)),
+    };
     const key = JSON.stringify(limits);
     if (key === this.lastLimitsKey) return;
     this.lastLimitsKey = key;
@@ -134,3 +131,9 @@ export class AuthManager {
 }
 
 function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)); }
+
+/** 取第一个有限数字（服务端字段缺失/为 null 时回退到下一个候选） */
+function numOr(...vals: unknown[]): number {
+  for (const v of vals) if (typeof v === 'number' && Number.isFinite(v)) return v;
+  return 0;
+}

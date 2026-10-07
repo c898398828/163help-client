@@ -31,6 +31,8 @@ export interface RuntimeDeps {
     /** 订阅播放进度（接入心跳 pulse） */
     onProgress(cb: (playedMs: number, positionMs: number, durationMs: number) => void): void;
   };
+  /** 轮询节奏（测试可缩短；默认：空闲 3s / 无单 30s，与 4.x 及服务端建议一致） */
+  timing?: { idleMs?: number; noTargetMs?: number };
 }
 
 export class ClientRuntime {
@@ -186,14 +188,16 @@ export class ClientRuntime {
           this.log.push('warn', 'cycle_stop', '凭证失效，停止领单循环（重新保存配置后自动恢复）');
           return;
         }
+        let wait = this.deps.timing?.idleMs ?? IDLE_POLL_MS;
         try {
           const p = await this.job.fetchNext();
           if (p && p.noTargetReason) {
             const reason = formatNoTarget(p.noTargetReason);
-            if (reason !== this.lastNoTargetReason) { // 去重：避免每 3s 刷同一条
+            if (reason !== this.lastNoTargetReason) { // 去重：避免反复刷同一条
               this.lastNoTargetReason = reason;
               this.log.push('info', 'no_target', reason);
             }
+            wait = this.deps.timing?.noTargetMs ?? NO_TARGET_RETRY_MS; // 无单退避 30s：降低请求频率与网络抖动影响
           } else if (p) {
             this.lastNoTargetReason = '';
           }
@@ -206,7 +210,7 @@ export class ClientRuntime {
             this.log.push('warn', 'cycle_error', msg);
           }
         }
-        await sleep(3000);
+        await sleep(wait);
       }
     } finally {
       this.cycling = false;
@@ -257,19 +261,40 @@ function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout
 /** 播放进度停滞阈值（与 4.x 客户端一致：40s 不动判定试听卡死） */
 const PLAYBACK_STALL_MS = 40_000;
 
-/** 服务端 noTargetReason 是对象摘要（与 4.x 客户端一致：{reason, participants, active, withAvailableCredit}）：
- *  渲染为可读文案；字符串原样返回。修复「String(对象) → [object Object]」日志。 */
-function formatNoTarget(r: unknown): string {
+/** 空闲轮询间隔（播放中同样按此节奏，但 phase 非 idle 时不会真的重复领单） */
+const IDLE_POLL_MS = 3000;
+
+/** 无单退避：与 4.x 及服务端「30s 后重试」一致（降低请求频率，减少网络抖动影响） */
+const NO_TARGET_RETRY_MS = 30_000;
+
+/** 无单原因文案（对齐 4.x/扩展的 noTargetReasonText：reason 映射 + 七项明细） */
+export function formatNoTarget(r: unknown): string {
   if (typeof r === 'string') return r;
-  if (!r || typeof r !== 'object') return '暂无可互助目标';
-  const s = r as { reason?: unknown; participants?: unknown; active?: unknown; withAvailableCredit?: unknown };
-  const reason = String(s.reason ?? '');
-  if (reason === 'resting') return '已连续播放较久，正在随机休息，稍后自动恢复';
-  if (reason === 'daily_limit') return '今日帮助次数已达上限，明天再来';
+  if (!r || typeof r !== 'object') return '暂无可互助目标，30s 后重试';
+  const s = r as Record<string, unknown>;
   const n = (v: unknown): number => Number(v) || 0;
-  const parts: string[] = [];
-  if (n(s.participants) > 0) parts.push(`参与者 ${n(s.participants)}`);
-  if (n(s.active) > 0) parts.push(`在线 ${n(s.active)}`);
-  if (n(s.withAvailableCredit) > 0) parts.push(`有额度 ${n(s.withAvailableCredit)}`);
-  return '暂无可互助目标' + (parts.length ? `（${parts.join(' / ')}）` : '');
+  const reason = String(s.reason || '');
+  if (reason === 'resting') return '已连续播放较久，正在随机休息，稍后自动恢复';
+  if (reason === 'daily_limit') return '今日帮助已达上限，24 小时后自动恢复';
+  const participants = n(s.participants), notSelf = n(s.notSelf), active = n(s.active);
+  const withCredit = n(s.withAvailableCredit), underMonthly = n(s.underMonthlyLimit);
+  const underActiveJobs = n(s.underActiveJobLimit), notInCooldown = n(s.notInCooldown);
+  // 服务端未下发明细（全 0）时不输出误导性的全 0 明细行
+  if (reason === 'contended' && !participants && !notSelf && !active && !withCredit && !underMonthly && !underActiveJobs && !notInCooldown) {
+    return '任务被抢，稍后再试';
+  }
+  const REASON_TEXT: Record<string, string> = {
+    no_participants: '当前没人加入互助队列',
+    only_self: '当前队列里只有你自己，不能给自己互助',
+    no_active_participants: '队列里没有正常状态的其他用户',
+    no_participant_with_credit: '其他入队用户都没有可用额度',
+    all_monthly_limit_reached: '其他入队用户都已达到近 30 天（滚动）被互助上限',
+    all_active_job_limited: '其他入队用户当前派发任务数已满',
+    all_in_cooldown: '其他候选都处于同账号冷却期',
+    no_eligible_participant: '当前没有满足条件的互助目标',
+    helper_banned: '网络环境不稳定，暂停互助一个小时',
+    helper_busy: '你已有一个进行中的任务，完成后才会接下一单',
+  };
+  const detail = `入队 ${participants} / 非本人 ${notSelf} / 正常 ${active} / 有额度 ${withCredit} / 未到上限 ${underMonthly} / 未超并发 ${underActiveJobs} / 非冷却 ${notInCooldown}`;
+  return `${REASON_TEXT[reason] || '暂无可互助目标'}（${detail}）`;
 }

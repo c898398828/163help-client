@@ -50,4 +50,47 @@ describe('AuthManager', () => {
     assert.equal(a.status, 'logged_out');
     assert.equal(adapter.storage.getToken(), '');
   });
+
+  test('按服务端真实 /api/me 结构映射额度（user.displayName + participant 秒闸/次数）', async () => {
+    const bus = new EventBus();
+    const limits: any[] = [];
+    const users: any[] = [];
+    bus.on('limits:updated', (l) => limits.push(l));
+    bus.on('auth:user', (u) => users.push(u));
+    const a2 = new AuthManager(adapter as never, {
+      refresh: async () => null,
+      me: async () => ({ status: 200, payload: {
+        user: { displayName: 'CoC', song_slot_limit: 3 },
+        participant: {
+          available_credits: 86,
+          help_seconds_used: 678,
+          help_seconds_limit: 8940,
+          received_finished_count_24h: 9,
+          today_received_limit: 26,
+          today_helped_count: 3,
+        },
+      } }),
+    } as never, bus);
+    adapter.storage.setToken('mh_ck_x');
+    await a2.refreshUser();
+    assert.equal(users[0]!.displayName, 'CoC');
+    assert.equal(users[0]!.credits, 86);
+    assert.deepEqual(limits[0], { helpedToday: 678, helpedLimit: 8940, receivedToday: 9, receivedLimit: 26 });
+  });
+
+  test('秒字段缺失时降级到次数字段', async () => {
+    const bus = new EventBus();
+    const limits: any[] = [];
+    bus.on('limits:updated', (l) => limits.push(l));
+    const a3 = new AuthManager(adapter as never, {
+      refresh: async () => null,
+      me: async () => ({ status: 200, payload: {
+        user: { displayName: '甲' },
+        participant: { today_helped_count: 3, today_helped_limit: 200, today_received_help_count: 2, today_received_limit: 26 },
+      } }),
+    } as never, bus);
+    adapter.storage.setToken('mh_ck_x');
+    await a3.refreshUser();
+    assert.deepEqual(limits[0], { helpedToday: 3, helpedLimit: 200, receivedToday: 2, receivedLimit: 26 });
+  });
 });

@@ -33,6 +33,7 @@ const state: Record<string, any> = {
   recv: 0, recvLimit: 26,
   jobsDone: 0,
   acctName: '',
+  credits: 0,
   configured: Boolean(String(boot.neteaseCookie || '').trim() && String(boot.clientKey || '').trim()),
   browserReady: false,
   authStatus: '',
@@ -156,7 +157,7 @@ runtime.bus.on('job:current', (j) => {
 });
 runtime.bus.on('job:progress', (p) => { if (state.job) state.job.playedMs = p.playedMs; });
 runtime.bus.on('heartbeat:tick', (t) => { state.hbIntervals.push(t.intervalMs); if (state.hbIntervals.length > 30) state.hbIntervals.shift(); });
-runtime.bus.on('auth:user', (u) => { state.acctName = u ? u.displayName : ''; });
+runtime.bus.on('auth:user', (u) => { state.acctName = u ? u.displayName : ''; state.credits = u ? u.credits : 0; });
 runtime.bus.on('auth:status', (s) => {
   state.authStatus = s;
   if (s === 'logged_out') pushLog('warn', '凭证已失效（或密钥有误），请在「设置」重新填写');
