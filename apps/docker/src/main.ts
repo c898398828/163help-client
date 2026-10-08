@@ -70,20 +70,28 @@ const storage = {
  *  因此按协议等价版本上报，服务端放行 5.x 后可用 CLIENT_VERSION 环境变量改回。 */
 const CLIENT_VERSION = process.env.CLIENT_VERSION || '4.0.21';
 
-/** 记录最近一次服务端请求结果（状态条/诊断用）；状态由好变坏时记一条日志，避免刷屏 */
+/** 记录最近一次服务端请求结果（状态条/诊断用）；状态由好变坏时记一条日志，避免刷屏。
+ *  4xx 是服务端最终裁决（401 会停循环、409 表示任务已失效），不能写成「将持续重试」误导排查。 */
 function setLastApi(r: { ok: boolean; status: number; at: number; error?: string }): void {
+  const prev = state.lastApi as { ok: boolean; status: number } | null;
   const wasOk = state.lastApiWasOk;
   state.lastApi = { ok: r.ok, status: r.status, at: r.at };
   if (!r.ok && wasOk !== false) {
-    if (r.status === 403 && r.error === 'client_upgrade_required') {
+    if (r.status === 401) {
+      pushLog('error', `凭证被服务端拒绝（401${r.error ? ' ' + r.error : ''}）：领单循环已停止，重新保存配置可恢复`);
+    } else if (r.status === 403 && r.error === 'client_upgrade_required') {
       pushLog('error', `服务端要求升级客户端（403 client_upgrade_required）：上报版本 ${CLIENT_VERSION} 不被接受`);
     } else if (r.status === 0) {
       pushLog('warn', `服务端请求失败（网络不可达：${r.error || '未知原因'}），将持续重试`);
+    } else if (r.status >= 400 && r.status < 500) {
+      pushLog('warn', `服务端拒绝请求（${r.status}${r.error ? ' ' + r.error : ''}），不会自动重试`);
     } else {
       pushLog('warn', `服务端请求失败（${r.status}${r.error ? ' ' + r.error : ''}），将持续重试`);
     }
   }
-  if (r.ok && wasOk === false) pushLog('info', '服务端连接已恢复');
+  // 只有网络/5xx 类失败才算「连接断了」；4xx 之后成功请求不代表恢复连接
+  const networkFailure = prev !== null && !prev.ok && (prev.status === 0 || prev.status >= 500);
+  if (r.ok && wasOk === false && networkFailure) pushLog('info', '服务端连接已恢复');
   state.lastApiWasOk = r.ok;
 }
 
@@ -166,8 +174,9 @@ const transport = createTransport({ api, getIdentity: refreshIdentity });
 let currentJobId: string | null = null;
 const player = {
   play: async (musicId: string, durationMs: number) => {
-    if (!browser) return false;
-    try { return await browser.play(musicId, durationMs); } catch { return false; }
+    if (!browser) return { ok: false, err: '浏览器未就绪' };
+    try { return await browser.play(musicId, durationMs); }
+    catch (e) { return { ok: false, err: e instanceof Error ? e.message : String(e) }; }
   },
   stop: async () => { try { await browser?.stop(); } catch { /* 页面可能已关闭 */ } },
   onProgress: (cb: (playedMs: number, positionMs: number, durationMs: number) => void) => {

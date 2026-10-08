@@ -15,11 +15,14 @@ export function createPageHelper(w: Record<string, any>): void {
   let playGeneration = 0;
   let playController: AbortController | null = null;
   // 必须留在工厂内：注入源码不能依赖 Node 侧闭包。
-  async function bounded<T>(request: Promise<T>, ms: number, onTimeout: () => void): Promise<T> {
+  async function bounded<T>(request: Promise<T>, ms: number, onTimeout: () => void, describe?: () => string): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([request, new Promise<never>((_, reject) => {
-        timer = setTimeout(() => { onTimeout(); reject(new Error('页内操作超时')); }, ms);
+        timer = setTimeout(() => {
+          onTimeout();
+          reject(new Error('页内操作超时' + (describe ? `（${describe()}）` : '')));
+        }, ms);
       })]);
     } finally { clearTimeout(timer); }
   }
@@ -37,26 +40,30 @@ export function createPageHelper(w: Record<string, any>): void {
       playController?.abort();
       const controller = new AbortController();
       playController = controller;
+      let stage = 'fetch'; // 超时/失败时说明卡在哪一步（取流 / 解析 / 起播）
       try {
         return await bounded((async () => {
           const id = String(musicId).replace(/^song:/, '');
+          stage = 'fetch';
           const r = await w.fetch('/api/song/enhance/player/url?ids=' + encodeURIComponent(JSON.stringify([Number(id)])) + '&br=128000', { signal: controller.signal });
+          stage = 'decode';
           const d = (await r.json()).data?.[0];
           // stop / 下一首可在 fetch 或 json 期间发生，迟到响应不得再修改音频。
-          if (generation !== playGeneration || controller.signal.aborted) return { ok: false };
+          if (generation !== playGeneration || controller.signal.aborted) return { ok: false, err: '已被停止或新的播放取代' };
           if (!d || !d.url) throw new Error('歌曲地址不可用');
           if (!this.audio) { this.audio = document.createElement('audio'); document.body.appendChild(this.audio); }
           lastDurMs = 0; // 仅缓存当前歌曲的时长，不能跨曲兜底
           this.audio.src = d.url;
           this.audio.playbackRate = 1;
+          stage = 'audio.play';
           await this.audio.play();
-          if (generation !== playGeneration || controller.signal.aborted) return { ok: false };
+          if (generation !== playGeneration || controller.signal.aborted) return { ok: false, err: '已被停止或新的播放取代' };
           const durationMs = Math.round(Number(d.duration) * 1000);
           return { ok: true, durationMs: Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 0 };
         })(), 20_000, () => {
           controller.abort();
           if (generation === playGeneration) this.stop();
-        });
+        }, () => stage);
       } catch (e) {
         if (generation === playGeneration) this.stop();
         return { ok: false, err: String(e) };
@@ -171,15 +178,18 @@ export class DockBrowser {
     } finally { clearTimeout(timer); }
   }
 
-  async play(musicId: string, _durationMs: number): Promise<boolean> {
+  async play(musicId: string, _durationMs: number): Promise<{ ok: boolean; err?: string }> {
     const generation = ++this.playGeneration;
     try {
-      const r = await this.evaluate((id: string) => (window as any).__mhPlayer.play(id), musicId, 20_000);
-      return generation === this.playGeneration && Boolean(r?.ok);
-    } catch {
+      // 外层时限必须大于页内 20s：让页内超时先返回「卡在哪一步」，否则只剩一句无信息的失败
+      const r = await this.evaluate((id: string) => (window as any).__mhPlayer.play(id), musicId, 25_000);
+      if (generation !== this.playGeneration) return { ok: false, err: '播放已被停止或取代' };
+      if (!r || typeof r !== 'object') return { ok: false, err: '页内播放器无响应' };
+      return { ok: r.ok === true, err: r.err ? String(r.err) : undefined };
+    } catch (e) {
       // renderer 恢复时也要失效超时播放，但不能清理另一首较新的歌曲。
       if (generation === this.playGeneration) void this.stop();
-      return false;
+      return { ok: false, err: e instanceof Error ? e.message : String(e) };
     }
   }
 

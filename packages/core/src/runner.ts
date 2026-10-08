@@ -9,6 +9,19 @@ import { ClientLogger } from './logger.js';
 import { EventBus } from './events.js';
 import type { ApiResult, ClientType, FinishInput, FinishPayload, MePayload, NextPayload, PlatformAdapter } from './types.js';
 
+/** 播放启动结果：旧端返回 boolean；带原因的端（docker）返回 {ok,err} 供日志与 abandon 详情使用 */
+export type PlayOutcome = boolean | { ok: boolean; err?: string };
+
+/** 归一化播放结果；`err` 拼成「：原因」后缀，缺失时为空串 */
+function playOk(outcome: PlayOutcome): boolean {
+  return typeof outcome === 'boolean' ? outcome : outcome?.ok === true;
+}
+
+function playErr(outcome: PlayOutcome): string {
+  const err = typeof outcome === 'object' && outcome ? outcome.err : '';
+  return err ? `：${err}` : '';
+}
+
 /** 端侧必须提供的四件套 */
 export interface RuntimeDeps {
   adapter: PlatformAdapter;
@@ -24,8 +37,8 @@ export interface RuntimeDeps {
     canRefresh?: boolean;
   };
   player: {
-    /** 命令播放器开始播 target（返回 false=加载失败，走放弃分支） */
-    play(musicId: string, durationMs: number, ownerName: string): Promise<boolean>;
+    /** 命令播放器开始播 target（返回 false / {ok:false,err} = 加载失败，走放弃分支） */
+    play(musicId: string, durationMs: number, ownerName: string): Promise<PlayOutcome>;
     /** 播放器停止（放弃/结算后） */
     stop(): void | Promise<void>;
     /** 订阅播放进度（接入心跳 pulse） */
@@ -73,7 +86,8 @@ export class ClientRuntime {
       abandon: async (r, d, jobId) => {
         const token = await this.auth.ensureToken();
         if (token) { try { await this.deps.transport.abandon(token, r, d, jobId); } catch { /* 静默 */ } }
-        this.log.push('warn', 'job_abandon', r, { detail: d });
+        // 日志必须带 detail：只写 "play_start_fail" 无法区分播放器失败与首心跳超时
+        this.log.push('warn', 'job_abandon', d ? `${r}：${d}` : r, { detail: d });
       },
       onPlaying: (job) => {
         if (!this.running) {
@@ -84,8 +98,9 @@ export class ClientRuntime {
         this.lastAdvanceMs = -1;
         this.lastAdvanceAt = -1;
         this.stallReported = false;
-        void this.deps.player.play(job.musicId, job.targetMs, '').then((ok) => {
-          if (!ok) this.failStart(job.jobId, '播放器加载失败');
+        void this.deps.player.play(job.musicId, job.targetMs, '').then((outcome) => {
+          if (playOk(outcome)) return;
+          this.failStart(job.jobId, '播放器加载失败' + playErr(outcome));
         }).catch((e) => this.failStart(job.jobId, '播放器异常：' + String(e)));
       },
       onSettleFailed: (code, msg) => {
@@ -300,7 +315,8 @@ export class ClientRuntime {
         playbackRate: 1, jumpCount: 0, backwardJumpCount: 0,
         listenDriftMs: 0, recoveryAttempts: 0, stallDetected: false,
       });
-      this.log.push(r === 'settled' ? 'info' : 'warn', 'job_finish', `本单结算：${r}`, { playedMs, targetMs: job.targetMs });
+      const secs = `（已播 ${Math.round(playedMs / 1000)}s / 目标 ${Math.round(job.targetMs / 1000)}s）`;
+      this.log.push(r === 'settled' ? 'info' : 'warn', 'job_finish', `本单结算：${r}${secs}`, { playedMs, targetMs: job.targetMs });
       if (this.running) void this.syncUser();
     } finally {
       this.finishing = false;

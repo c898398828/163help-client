@@ -24,14 +24,32 @@ describe('浏览器操作有界等待', () => {
     (db as any).page = { evaluate: (fn: Function, arg: unknown) =>
       Promise.resolve(new Function('window', 'arg', 'return (' + fn.toString() + ')(arg)')(fakeWindow, arg)) };
     const old = db.play('1', 60_000);
-    assert.equal(await db.play('2', 60_000), true);
-    t.mock.timers.tick(20_000);
+    assert.equal((await db.play('2', 60_000)).ok, true);
+    t.mock.timers.tick(25_000);
     await flush();
-    assert.equal(await old, false);
+    assert.equal((await old).ok, false);
     assert.equal(current, '2');
   });
 
-  for (const [method, limit] of [['play', 20_000], ['progress', 5_000], ['stop', 5_000], ['identity', 12_000]] as const) {
+  test('renderer 返回的失败原因透传给调用方（不再只剩 false）', async () => {
+    const db = new DockBrowser('/tmp', '');
+    (db as any).page = { evaluate: async () => ({ ok: false, err: '歌曲地址不可用' }) };
+    assert.deepEqual(await db.play('1', 60_000), { ok: false, err: '歌曲地址不可用' });
+  });
+
+  test('外层 evaluate 超时也返回带原因的失败', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const db = new DockBrowser('/tmp', '');
+    (db as any).page = { evaluate: () => new Promise(() => {}) };
+    let result: any;
+    void db.play('1', 60_000).then((value) => { result = value; });
+    t.mock.timers.tick(25_000);
+    await flush();
+    assert.equal(result.ok, false);
+    assert.match(String(result.err), /超时/);
+  });
+
+  for (const [method, limit] of [['play', 25_000], ['progress', 5_000], ['stop', 5_000], ['identity', 12_000]] as const) {
     test(`${method} 在 renderer 永不响应时于 ${limit}ms 内结束`, async (t) => {
       t.mock.timers.enable({ apis: ['setTimeout'] });
       const db = new DockBrowser('/tmp', '');
@@ -47,7 +65,8 @@ describe('浏览器操作有界等待', () => {
       assert.ok(result, 'renderer 挂起不能无限阻塞调用者');
       if (method === 'progress') assert.match(String(result.error), /超时|timeout/i);
       else if (method === 'identity') assert.deepEqual(result.value, { id: '', name: '', vipType: 0 });
-      else assert.equal(result.value, method === 'play' ? false : undefined);
+      else if (method === 'play') assert.equal((result.value as any).ok, false);
+      else assert.equal(result.value, undefined);
     });
   }
 });
@@ -146,6 +165,42 @@ describe('页内异步请求超时与歌曲失效', () => {
     requests[0]!.resolve(song('late-track'));
     await flush();
     assert.equal(player.audio.src, '');
+  });
+
+  test('取流请求挂起 20s → 失败原因说明卡在 fetch 阶段', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { player } = playerWithRequests();
+    let result: any;
+    void player.play('1').then((value: unknown) => { result = value; });
+    t.mock.timers.tick(20_000);
+    await flush();
+    assert.equal(result.ok, false);
+    assert.match(String(result.err), /页内操作超时/);
+    assert.match(String(result.err), /fetch/);
+  });
+
+  test('audio.play 挂起 20s → 失败原因说明卡在 audio.play 阶段', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { player, requests } = playerWithRequests();
+    player.audio.play = () => new Promise(() => {});
+    let result: any;
+    void player.play('1').then((value: unknown) => { result = value; });
+    requests[0]!.resolve(song('track-a'));
+    await flush();
+    t.mock.timers.tick(20_000);
+    await flush();
+    assert.equal(result.ok, false);
+    assert.match(String(result.err), /audio\.play/);
+    assert.equal(player.audio.src, '');
+  });
+
+  test('歌曲地址不可用时返回可读原因', async () => {
+    const { player, requests } = playerWithRequests();
+    const pending = player.play('1');
+    requests[0]!.resolve({ json: async () => ({ data: [{ url: null }] }) });
+    const result = await pending;
+    assert.equal(result.ok, false);
+    assert.match(String(result.err), /歌曲地址不可用/);
   });
 
   test('音频加载失败返回失败且清理当前音频', async () => {

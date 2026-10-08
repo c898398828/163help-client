@@ -9,6 +9,7 @@ interface Harness {
   fireProgress: (playedMs: number, positionMs: number, durationMs: number) => void;
   setNext: (p: unknown) => void;
   setPlayOk: (ok: boolean) => void;
+  setPlayResult: (r: boolean | { ok: boolean; err?: string }) => void;
   setNext401: (on: boolean) => void;
   setHbOk: (ok: boolean) => void;
   setNextThrow: (on: boolean) => void;
@@ -18,7 +19,7 @@ function makeHarness(opts: { token?: string; playOk?: boolean; next?: unknown; t
   const calls = { next: 0, finish: [] as any[], abandon: [] as any[], play: [] as Array<{ id: string; ms: number }>, heartbeat: [] as any[] };
   let progressCb: (a: number, b: number, c: number) => void = () => {};
   let nextPayload: any = opts.next ?? { musicId: 'song:123', jobId: 'j1', targetDurationMs: 300_000, owner: { displayName: '甲' } };
-  let playOk = opts.playOk ?? true;
+  let playOk: boolean | { ok: boolean; err?: string } = opts.playOk ?? true;
   let next401 = false;
   let nextThrow = false;
   let hbOk = opts.hbOk ?? true;
@@ -56,6 +57,7 @@ function makeHarness(opts: { token?: string; playOk?: boolean; next?: unknown; t
     fireProgress: (a, b, c) => progressCb(a, b, c),
     setNext: (p) => { nextPayload = p; },
     setPlayOk: (ok) => { playOk = ok; },
+    setPlayResult: (r) => { playOk = r; },
     setNext401: (on) => { next401 = on; },
     setHbOk: (ok) => { hbOk = ok; },
     setNextThrow: (on) => { nextThrow = on; },
@@ -132,6 +134,23 @@ describe('ClientRuntime 主循环（docker 端关键路径）', () => {
       assert.equal(h.calls.abandon.length, 1);
       assert.equal(h.calls.abandon[0]!.reason, 'play_start_fail');
       assert.equal(h.runtime.job.current, null);
+    } finally { cleanup(h); }
+  });
+
+  test('播放器返回失败原因时写进放弃详情与日志（play_start_fail 不再只有原因名）', async () => {
+    const h = makeHarness();
+    try {
+      h.setPlayResult({ ok: false, err: '页内操作超时（audio.play）' });
+      await h.runtime.start(true);
+      await tick();
+      assert.equal(h.calls.abandon.length, 1);
+      assert.equal(h.calls.abandon[0]!.reason, 'play_start_fail');
+      assert.ok(String(h.calls.abandon[0]!.detail).includes('audio.play'),
+        `放弃详情应含页内原因：${h.calls.abandon[0]!.detail}`);
+      const log = h.busLogs.find((e) => e.event === 'job_abandon');
+      assert.ok(log, '应有 job_abandon 日志');
+      assert.ok(String(log.msg).includes('audio.play'), `日志应含页内原因：${log.msg}`);
+      assert.ok(String(log.msg).includes('play_start_fail'), `日志应含原因名：${log.msg}`);
     } finally { cleanup(h); }
   });
 

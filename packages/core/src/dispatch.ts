@@ -96,7 +96,10 @@ export class JobStateMachine {
         return 'settled';
       }
       const code = r.error || r.payload?.error || `finish_http_${r.status}`;
-      this.deps.onSettleFailed(code, `结算未确认：${code}`);
+      // 带上已播/目标秒数：409 job_not_active 这类服务端裁决必须能一眼看出播了多久
+      const played = Math.round((Number(input.playedMs) || 0) / 1000);
+      const target = Math.round(job.targetMs / 1000);
+      this.deps.onSettleFailed(code, `结算未确认：${code}（已播 ${played}s / 目标 ${target}s）`);
       return r.status >= 400 && r.status < 500 ? 'rejected' : 'error';
     } catch {
       this.deps.onSettleFailed('finish_failed', '结算请求异常，未确认入账');

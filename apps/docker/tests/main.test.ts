@@ -24,6 +24,7 @@ interface Hooks {
   setCookie?: () => Promise<void>;
   stop?: () => Promise<void>;
   progress?: () => Promise<{ playedMs: number; durationMs: number }>;
+  play?: () => Promise<unknown>;
   start?: () => Promise<void>;
   save?: () => void;
   vipType?: number;
@@ -62,7 +63,7 @@ async function boot(hooks: Hooks = {}) {
       return { id: '123', name: 'test', vipType: hooks.vipType ?? 11 };
     }
     async stop() { events.push('player:stop'); await hooks.stop?.(); events.push('player:stopped'); }
-    async play() { return true; }
+    async play() { return hooks.play ? hooks.play() : { ok: true }; }
     async progress() { return hooks.progress ? hooks.progress() : { playedMs: 0, durationMs: 0 }; }
   }
   class FakeRuntime {
@@ -121,9 +122,13 @@ async function boot(hooks: Hooks = {}) {
     clearTimeout: (t: { cancelled: boolean }) => { t.cancelled = true; },
     clearInterval: (t: { cancelled: boolean }) => { t.cancelled = true; },
   });
-  vm.runInContext(source + '\n;globalThis.app = { state, runtime, launchBrowser, transport, player };', context);
+  vm.runInContext(source + '\n;globalThis.app = { state, runtime, launchBrowser, transport, player, setLastApi };', context);
   await flush();
-  const app = (context as any).app as { state: any; runtime: FakeRuntime; launchBrowser: () => Promise<boolean>; transport: ReturnType<typeof createTransport>; player: any };
+  const app = (context as any).app as {
+    state: any; runtime: FakeRuntime; launchBrowser: () => Promise<boolean>;
+    transport: ReturnType<typeof createTransport>; player: any;
+    setLastApi: (r: { ok: boolean; status: number; at: number; error?: string }) => void;
+  };
   return {
     ...app, browsers, events, requests, timers,
     config: () => ({ ...saved }),
@@ -412,4 +417,43 @@ test('未配置时不启动 runtime，后台重试也不领取任务', async () 
   await app.fire(60_000);
   assert.equal(app.runtime.starts, 0);
   assert.equal(app.requests.length, 0);
+});
+
+test('播放器失败原因透传给 runtime（页内错误不能只剩一句「加载失败」）', async () => {
+  const app = await boot({ play: async () => ({ ok: false, err: '页内操作超时（fetch）' }) });
+  assert.deepEqual(await app.player.play('song:1', 1000), { ok: false, err: '页内操作超时（fetch）' });
+});
+
+test('播放器抛异常时转成带原因的失败，不让 runtime 收到裸异常', async () => {
+  const app = await boot({ play: async () => { throw new Error('page crashed'); } });
+  const r = await app.player.play('song:1', 1000);
+  assert.equal(r.ok, false);
+  assert.match(String(r.err), /page crashed/);
+});
+
+test('终态 4xx（401/409）不写成「将持续重试」，网络失败才提示重试', async () => {
+  const app = await boot();
+  app.setLastApi({ ok: false, status: 409, at: 1, error: 'job_not_active' });
+  const rejected = app.state.logs.at(-1).msg;
+  assert.match(rejected, /409/);
+  assert.match(rejected, /job_not_active/);
+  assert.doesNotMatch(rejected, /持续重试/);
+  app.setLastApi({ ok: true, status: 200, at: 2 }); // 状态转好后才会再记一条（同因去重）
+  app.setLastApi({ ok: false, status: 401, at: 3, error: 'invalid_or_expired_token' });
+  const unauthorized = app.state.logs.at(-1).msg;
+  assert.match(unauthorized, /401/);
+  assert.doesNotMatch(unauthorized, /持续重试/);
+  app.setLastApi({ ok: true, status: 200, at: 4 });
+  app.setLastApi({ ok: false, status: 0, at: 5, error: 'ECONNRESET' });
+  assert.match(app.state.logs.at(-1).msg, /持续重试/);
+});
+
+test('被拒的 4xx 之后恢复成功不报「服务端连接已恢复」（本来就没断）', async () => {
+  const app = await boot();
+  app.setLastApi({ ok: false, status: 409, at: 1, error: 'job_not_active' });
+  app.setLastApi({ ok: true, status: 200, at: 2 });
+  assert.equal(app.state.logs.some((l: any) => /连接已恢复/.test(l.msg)), false);
+  app.setLastApi({ ok: false, status: 0, at: 3, error: 'ECONNRESET' });
+  app.setLastApi({ ok: true, status: 200, at: 4 });
+  assert.equal(app.state.logs.some((l: any) => /连接已恢复/.test(l.msg)), true);
 });

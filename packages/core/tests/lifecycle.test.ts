@@ -93,6 +93,22 @@ test('only acknowledged successful finishes emit job:settled; abandon includes j
   assert.equal(settled.length, 1);
 });
 
+test('rejected finish reports played/target seconds so 409 job_not_active can be diagnosed', async () => {
+  const bus = new EventBus(), failed = [];
+  const machine = new JobStateMachine({
+    next: async () => ({ status: 200, payload: { jobId: 'j1', musicId: 'song:1', targetDurationMs: 300000 } }),
+    finish: async () => ({ status: 409, payload: null, error: 'job_not_active' }),
+    abandon: async () => {}, onPlaying: () => {},
+    onSettleFailed: (code, msg) => failed.push({ code, msg }),
+  }, bus);
+  await machine.fetchNext();
+  assert.equal(await machine.submitFinish({ jobId: 'j1', playedMs: 309000 }), 'rejected');
+  assert.equal(failed[0].code, 'job_not_active');
+  assert.match(failed[0].msg, /job_not_active/);
+  assert.match(failed[0].msg, /309s/);
+  assert.match(failed[0].msg, /目标 300s/);
+});
+
 function runtime(t, options = {}) {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'], now: 1000 });
   const snapshots = [], limits = [], calls = { me: 0, next: 0 };
