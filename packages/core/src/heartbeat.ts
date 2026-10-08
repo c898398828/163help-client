@@ -1,6 +1,6 @@
 /**
  * 心跳引擎（严格协议 §4）：
- * - 播放期间每 10s 上报
+ * - 首个真实正进度立即上报，之后播放期间每 10s 上报
  * - 首心跳：领取后 30s 内必须出现，否则 abandon('play_start_fail')
  * - 中断：距上次心跳 >45s → abandon('heartbeat_lost')
  * - freeze/resume：冻结前补帧；恢复后任务仍有效→续听；已过期→自动重接
@@ -68,11 +68,14 @@ export class HeartbeatEngine {
     this.timer = setInterval(() => { void this.tick(); }, this.opts.intervalMs);
   }
 
-  /** 播放器进度更新（不发请求）：按协议每 intervalMs 由 tick 带上「最近一次进度」上报 */
+  /** 首个真实正进度立即上报；之后仅更新采样，由 tick 按 intervalMs 上报。 */
   update(playedMs: number, positionMs: number, durationMs: number): void {
     if (this.stopped || ![playedMs, positionMs, durationMs].every(Number.isFinite)) return;
     this.lastProgress = { playedMs, positionMs, durationMs };
     this.lastSampleAt = Date.now();
+    // 避免刚错过 20s tick 的起播等到 30s，先被首心跳宽限期放弃。
+    // 首次尝试即置位；失败仍等后续 tick，不随每秒进度高频重试。
+    if (playedMs > 0 && this.firstAttemptAt < 0) void this.flush().catch(() => {});
   }
 
   /** 立即补报一次（freeze 前等场景）；是否成功以服务端确认为准 */
@@ -87,7 +90,13 @@ export class HeartbeatEngine {
     const generation = this.generation;
     const jobId = this.jobId;
     const p = this.lastProgress;
-    if (this.firstAttemptAt < 0) this.firstAttemptAt = Date.now();
+    if (this.firstAttemptAt < 0) {
+      this.firstAttemptAt = Date.now();
+      // 从首发时刻重新计算周期，避免紧接着领取时刻的旧 tick 再次上报。
+      // 只重置 interval，领取后的首心跳确认宽限期保持不变。
+      if (this.timer) clearInterval(this.timer);
+      this.timer = setInterval(() => { void this.tick(); }, this.opts.intervalMs);
+    }
     const request = (async () => {
       try {
         const ok = await this.api.heartbeat({ jobId, ...p, monotonic: true });

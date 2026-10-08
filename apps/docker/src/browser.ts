@@ -20,15 +20,24 @@ export function createPageHelper(w: Record<string, any>): void {
     try {
       return await Promise.race([request, new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
+          // 先抓诊断：onTimeout 会停止媒体并清掉它的状态。
+          const error = new Error('页内操作超时' + (describe ? `（${describe()}）` : ''));
           onTimeout();
-          reject(new Error('页内操作超时' + (describe ? `（${describe()}）` : '')));
+          reject(error);
         }, ms);
       })]);
     } finally { clearTimeout(timer); }
   }
+  function resetAudio(audio: HTMLAudioElement): void {
+    audio.pause();
+    // 仅 src='' 不保证立即终止旧请求；load() 会取消旧的媒体加载和 play Promise。
+    if (audio.removeAttribute) audio.removeAttribute('src');
+    else audio.src = '';
+    audio.load?.();
+  }
   const player: {
     audio: HTMLAudioElement | null;
-    play(musicId: string | number): Promise<{ ok: boolean; err?: string; durationMs?: number }>;
+    play(musicId: string | number): Promise<{ ok: boolean; err?: string; durationMs?: number; attempts?: number }>;
     progress(): { playedMs: number; durationMs: number };
     identity(): Promise<{ id: string; name: string; vipType: number }>;
     setRate(r: number): void;
@@ -40,33 +49,95 @@ export function createPageHelper(w: Record<string, any>): void {
       playController?.abort();
       const controller = new AbortController();
       playController = controller;
-      let stage = 'fetch'; // 超时/失败时说明卡在哪一步（取流 / 解析 / 起播）
+      const startedAt = Date.now();
+      const current = () => generation === playGeneration && !controller.signal.aborted;
+      let attempt = 1;
+      let stage: 'fetch' | 'decode' | 'audio.play' = 'fetch';
+      let stageAt = startedAt;
+      let times = { fetch: 0, decode: 0, 'audio.play': 0 };
+      let sourceHost = '-';
+      let media: HTMLAudioElement | null = null;
+      let timeoutDiagnostic = '';
+      const previousAttempts: string[] = [];
+      const enterStage = (next: typeof stage) => {
+        const now = Date.now();
+        times[stage] += Math.max(0, now - stageAt);
+        stage = next;
+        stageAt = now;
+      };
+      const describeAttempt = () => {
+        const elapsed = { ...times, [stage]: times[stage] + Math.max(0, Date.now() - stageAt) };
+        const audio = current() ? media : null;
+        return `attempt=${attempt} fetch=${elapsed.fetch}ms decode=${elapsed.decode}ms audio.play=${elapsed['audio.play']}ms`
+          + ` readyState=${audio?.readyState ?? '-'} networkState=${audio?.networkState ?? '-'} mediaError=${audio?.error?.code ?? 0} sourceHost=${sourceHost}`;
+      };
+      const diagnostic = () => [...previousAttempts, describeAttempt()].join('；');
       try {
         return await bounded((async () => {
           const id = String(musicId).replace(/^song:/, '');
-          stage = 'fetch';
-          const r = await w.fetch('/api/song/enhance/player/url?ids=' + encodeURIComponent(JSON.stringify([Number(id)])) + '&br=128000', { signal: controller.signal });
-          stage = 'decode';
-          const d = (await r.json()).data?.[0];
-          // stop / 下一首可在 fetch 或 json 期间发生，迟到响应不得再修改音频。
-          if (generation !== playGeneration || controller.signal.aborted) return { ok: false, err: '已被停止或新的播放取代' };
-          if (!d || !d.url) throw new Error('歌曲地址不可用');
-          if (!this.audio) { this.audio = document.createElement('audio'); document.body.appendChild(this.audio); }
-          lastDurMs = 0; // 仅缓存当前歌曲的时长，不能跨曲兜底
-          this.audio.src = d.url;
-          this.audio.playbackRate = 1;
-          stage = 'audio.play';
-          await this.audio.play();
-          if (generation !== playGeneration || controller.signal.aborted) return { ok: false, err: '已被停止或新的播放取代' };
-          const durationMs = Math.round(Number(d.duration) * 1000);
-          return { ok: true, durationMs: Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 0 };
+          for (;;) {
+            // 播放地址可能短时失效；恢复时必须真正取新地址，不能复用 HTTP 缓存里的旧 JSON。
+            const r = await w.fetch('/api/song/enhance/player/url?ids=' + encodeURIComponent(JSON.stringify([Number(id)])) + '&br=128000', { signal: controller.signal, cache: 'no-store' });
+            if (!current()) return { ok: false, err: '已被停止或新的播放取代' };
+            enterStage('decode');
+            if (r.ok === false) throw new Error(`歌曲地址请求失败（HTTP ${r.status}）`);
+            const d = (await r.json()).data?.[0];
+            // stop / 下一首可在 fetch 或 json 期间发生，迟到响应不得再修改音频。
+            if (!current()) return { ok: false, err: '已被停止或新的播放取代' };
+            if (!d || !d.url) throw new Error('歌曲地址不可用');
+            try { sourceHost = new URL(d.url).hostname; } catch { sourceHost = '-'; }
+            if (!this.audio) { this.audio = document.createElement('audio'); document.body.appendChild(this.audio); }
+            media = this.audio;
+            lastDurMs = 0; // 仅缓存当前歌曲的时长，不能跨曲兜底
+            media.src = d.url;
+            media.playbackRate = 1;
+            enterStage('audio.play');
+            const startTimeout = new Error('音频起播等待超时');
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            try {
+              const playing = media.play();
+              // 只给首次起播一个恢复机会；第二次及慢取流后的起播仍受原 20s 总预算约束。
+              if (attempt === 1 && Date.now() - startedAt < 12_000) {
+                await Promise.race([playing, new Promise<never>((_, reject) => {
+                  timer = setTimeout(() => reject(startTimeout), 8_000);
+                })]);
+              } else await playing;
+            } catch (e) {
+              if (!current()) throw e;
+              const position = Number(media.currentTime);
+              const progressed = Number.isFinite(position) && position > 0;
+              const code = media.error?.code ?? 0;
+              const name = e instanceof Error ? e.name : '';
+              // Promise 未完成但音频确实已开始，不能清零已经上报的进度。
+              if (!(e === startTimeout && progressed && (!media.paused || media.ended) && !code)) {
+                const terminal = ['NotAllowedError', 'NotSupportedError', 'SecurityError'].includes(name) || [1, 3, 4].includes(code);
+                const temporary = e === startTimeout || name === 'NetworkError' || code === 2;
+                if (attempt !== 1 || progressed || terminal || !temporary || Date.now() - startedAt >= 20_000) throw e;
+                previousAttempts.push(describeAttempt());
+                resetAudio(media);
+                attempt = 2;
+                stage = 'fetch';
+                stageAt = Date.now();
+                times = { fetch: 0, decode: 0, 'audio.play': 0 };
+                sourceHost = '-';
+                media = null;
+                continue;
+              }
+            } finally { clearTimeout(timer); }
+            if (!current()) return { ok: false, err: '已被停止或新的播放取代' };
+            const durationMs = Math.round(Number(d.duration) * 1000);
+            return { ok: true, durationMs: Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 0, ...(attempt === 2 ? { attempts: 2 } : {}) };
+          }
         })(), 20_000, () => {
           controller.abort();
           if (generation === playGeneration) this.stop();
-        }, () => stage);
+        }, () => { timeoutDiagnostic = diagnostic(); return stage; });
       } catch (e) {
+        const detail = timeoutDiagnostic || diagnostic();
+        // 浏览器错误偶尔也带媒体 URL；日志只保留上面的 hostname，不泄露签名参数。
+        const error = String(e).replace(/https?:\/\/[^\s"'<>]+/gi, '[媒体地址已隐藏]') + '；' + detail;
         if (generation === playGeneration) this.stop();
-        return { ok: false, err: String(e) };
+        return { ok: false, err: error };
       } finally {
         if (playController === controller) playController = null;
       }
@@ -106,7 +177,7 @@ export function createPageHelper(w: Record<string, any>): void {
       playController?.abort();
       playController = null;
       lastDurMs = 0;
-      if (this.audio) { this.audio.pause(); this.audio.src = ''; }
+      if (this.audio) resetAudio(this.audio);
     },
   };
   w.__mhPlayer = player;
@@ -178,14 +249,14 @@ export class DockBrowser {
     } finally { clearTimeout(timer); }
   }
 
-  async play(musicId: string, _durationMs: number): Promise<{ ok: boolean; err?: string }> {
+  async play(musicId: string, _durationMs: number): Promise<{ ok: boolean; err?: string; attempts?: number }> {
     const generation = ++this.playGeneration;
     try {
       // 外层时限必须大于页内 20s：让页内超时先返回「卡在哪一步」，否则只剩一句无信息的失败
       const r = await this.evaluate((id: string) => (window as any).__mhPlayer.play(id), musicId, 25_000);
       if (generation !== this.playGeneration) return { ok: false, err: '播放已被停止或取代' };
       if (!r || typeof r !== 'object') return { ok: false, err: '页内播放器无响应' };
-      return { ok: r.ok === true, err: r.err ? String(r.err) : undefined };
+      return { ok: r.ok === true, err: r.err ? String(r.err) : undefined, ...(r.ok === true && r.attempts === 2 ? { attempts: 2 } : {}) };
     } catch (e) {
       // renderer 恢复时也要失效超时播放，但不能清理另一首较新的歌曲。
       if (generation === this.playGeneration) void this.stop();

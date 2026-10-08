@@ -10,16 +10,31 @@ import type { ApiResponse } from './api.ts';
 
 export interface Identity { id: string; name: string; vipType: number }
 
+/** 仅含任务标识与安全错误码，不携带凭证、播放账号或原始响应。 */
+export interface HeartbeatRejection { jobId: string; status: number; error: string }
+
 export interface TransportDeps {
   api: <T>(method: string, path: string, body?: unknown, token?: string, opts?: { retryNetwork?: boolean }) => Promise<ApiResponse<T>>;
   getIdentity: () => Promise<Identity>;
   /** 结算尝试次数（默认 3）与间隔（默认 1500ms） */
   finishAttempts?: number;
   finishDelayMs?: number;
+  /** 一次心跳最终失败时报告一次；诊断异常不得影响心跳结果。 */
+  onHeartbeatRejected?: (failure: HeartbeatRejection) => void;
 }
 
 /** 结算可重试的服务端状态（网络层失败 status=0 同样重试） */
 const RETRY_FINISH_STATUSES = [500, 502, 503, 504];
+
+// 仅透传已有协议中的错误标识；任意文本可能包含 token、Cookie、URL 或账号。
+const HEARTBEAT_ERROR_CODES = new Set([
+  'job_not_active', 'job_expired', 'heartbeat_lost',
+  'invalid_or_expired_token', 'token_expired', 'client_upgrade_required',
+]);
+
+function hasError(error: unknown): boolean {
+  return Boolean(error); // 空串/null/false/0 与旧成功响应中的「无错误」语义兼容。
+}
 
 export function createTransport(deps: TransportDeps) {
   const api = deps.api;
@@ -45,12 +60,30 @@ export function createTransport(deps: TransportDeps) {
       await api('POST', '/api/play/abandon', { jobId, reason, detail }, token);
     },
 
-    /** 心跳：附带网易云身份；身份获取失败降级为空身份，不阻塞上报 */
+    /** 心跳：附带网易云身份；HTTP 200 仍需有效对象且没有显式业务拒绝。 */
     heartbeat: async (token: string, input: unknown): Promise<boolean> => {
       let ident = emptyIdentity;
       try { ident = await deps.getIdentity(); } catch { /* 页面繁忙：降级 */ }
-      const body = { ...(input as Record<string, unknown>), neteaseId: ident.id, neteaseName: ident.name };
-      return (await api('POST', '/api/play/heartbeat', body, token, { retryNetwork: true })).status === 200;
+      const body: Record<string, unknown> = { ...(input as Record<string, unknown>), neteaseId: ident.id, neteaseName: ident.name };
+      let response: ApiResponse<unknown>;
+      try { response = await api('POST', '/api/play/heartbeat', body, token, { retryNetwork: true }); }
+      catch { response = { status: 0, payload: null }; }
+      const payload = response.payload !== null && typeof response.payload === 'object' && !Array.isArray(response.payload)
+        ? response.payload as Record<string, unknown> : null;
+      const rawError = hasError(response.error) ? response.error : payload?.error;
+      // 兼容旧服务端的无 ok 字段对象，不臆造新的成功响应字段。
+      if (response.status === 200 && payload && payload.ok !== false && !hasError(rawError)) return true;
+
+      const fallback = response.status === 0 ? 'heartbeat_network_error'
+        : response.status !== 200 ? `heartbeat_http_${response.status}`
+        : payload ? 'heartbeat_rejected' : 'heartbeat_invalid_response';
+      const error = typeof rawError === 'string' && HEARTBEAT_ERROR_CODES.has(rawError) ? rawError : fallback;
+      try {
+        void Promise.resolve(deps.onHeartbeatRejected?.({
+          jobId: typeof body.jobId === 'string' ? body.jobId : '', status: response.status, error,
+        })).catch(() => {});
+      } catch { /* 诊断失败不能变成播放/网络错误 */ }
+      return false;
     },
 
     refresh: async () => null, // key 凭证不走 session refresh

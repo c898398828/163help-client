@@ -10,7 +10,7 @@ import { EventBus } from './events.js';
 import type { ApiResult, ClientType, FinishInput, FinishPayload, MePayload, NextPayload, PlatformAdapter } from './types.js';
 
 /** 播放启动结果：旧端返回 boolean；带原因的端（docker）返回 {ok,err} 供日志与 abandon 详情使用 */
-export type PlayOutcome = boolean | { ok: boolean; err?: string };
+export type PlayOutcome = boolean | { ok: boolean; err?: string; attempts?: number };
 
 /** 归一化播放结果；`err` 拼成「：原因」后缀，缺失时为空串 */
 function playOk(outcome: PlayOutcome): boolean {
@@ -94,17 +94,35 @@ export class ClientRuntime {
           void this.job.abandon('runtime_stopped', '暂停期间返回的任务，使用旧凭证释放');
           return;
         }
+        this.jobStartedAt = Date.now();
+        this.lastHeartbeatAt = null;
+        this.heartbeatAcks = 0;
+        this.playRecoveryAttempts = 0;
         this.heart.start(job.jobId);
         this.lastAdvanceMs = -1;
         this.lastAdvanceAt = -1;
         this.stallReported = false;
         void this.deps.player.play(job.musicId, job.targetMs, '').then((outcome) => {
-          if (playOk(outcome)) return;
+          if (!this.running || this.finishing || this.job.current?.jobId !== job.jobId || this.job.phase !== 'playing') return;
+          if (playOk(outcome)) {
+            const attempts = typeof outcome === 'object' ? outcome.attempts : undefined;
+            if (typeof attempts === 'number' && Number.isSafeInteger(attempts) && attempts > 1) {
+              this.playRecoveryAttempts = attempts - 1;
+              this.log.push('info', 'playback_recovered', `第 ${attempts} 次尝试起播成功（任务 ${job.jobId}）`, { jobId: job.jobId, attempts });
+            }
+            return;
+          }
           this.failStart(job.jobId, '播放器加载失败' + playErr(outcome));
         }).catch((e) => this.failStart(job.jobId, '播放器异常：' + String(e)));
       },
       onSettleFailed: (code, msg) => {
-        this.log.push('error', 'settle_failed', msg, { code });
+        const jobId = this.job.current?.jobId ?? '';
+        const now = Date.now();
+        const elapsedMs = Math.max(0, now - this.jobStartedAt);
+        const lastHeartbeatAgeMs = this.lastHeartbeatAt === null ? null : Math.max(0, now - this.lastHeartbeatAt);
+        const lastAck = lastHeartbeatAgeMs === null ? '从未确认' : `${Math.round(lastHeartbeatAgeMs / 1000)}s 前`;
+        this.log.push('error', 'settle_failed', `${msg}；任务 ${jobId} / 领取至今 ${Math.round(elapsedMs / 1000)}s / 已确认心跳 ${this.heartbeatAcks} 次 / 最后确认 ${lastAck}`,
+          { code, jobId, elapsedMs, heartbeatAcks: this.heartbeatAcks, lastHeartbeatAgeMs });
         this.bus.emit('job:phase', 'settle_failed');
       },
     }, this.bus);
@@ -127,14 +145,19 @@ export class ClientRuntime {
     deps.player.onProgress((playedMs, positionMs, durationMs) => {
       if (!this.running || this.finishing || this.job.phase !== 'playing') return;
       this.job.updateProgress(playedMs);
-      this.heart.update(playedMs, positionMs, durationMs); // 只更新进度：按协议每 10s 由心跳引擎上报一次
+      this.heart.update(playedMs, positionMs, durationMs); // 首个真实进度立即上报，后续按 10s 节奏
       this.trackProgress(playedMs);
       void this.maybeFinish(positionMs, durationMs);
     });
 
     // UI 镜像事件
     this.bus.on('job:current', (j: CurrentJob | null) => {
-      if (j) this.log.push('info', 'job_start', `本单开始：${j.musicId}（目标 ${Math.round(j.targetMs / 1000)}s）`);
+      if (j) this.log.push('info', 'job_start', `本单开始：${j.musicId}（目标 ${Math.round(j.targetMs / 1000)}s / 任务 ${j.jobId}）`);
+    });
+    this.bus.on('heartbeat:tick', (e) => {
+      if (e.jobId !== this.job.current?.jobId) return;
+      this.lastHeartbeatAt = e.lastAtMs;
+      this.heartbeatAcks++;
     });
   }
 
@@ -192,6 +215,10 @@ export class ClientRuntime {
   private lastAdvanceMs = -1; // 上次进度前移时的 playedMs（-1 = 本单尚无进度）
   private lastAdvanceAt = -1;
   private stallReported = false;
+  private jobStartedAt = 0;
+  private lastHeartbeatAt: number | null = null;
+  private heartbeatAcks = 0;
+  private playRecoveryAttempts = 0;
 
   /** 卡死判定（对齐 4.x 的 playback_stalled）：播放中进度 PLAYBACK_STALL_MS 未前移 → 放弃本单，避免永久挂着 */
   private trackProgress(playedMs: number): void {
@@ -293,8 +320,10 @@ export class ClientRuntime {
 
   /** 播放未开始（加载失败/播放器异常）：停心跳、放弃本单，让主循环继续领下一单 */
   private failStart(jobId: string, detail: string): void {
-    if (this.job.current?.jobId !== jobId) return; // 已被结算/放弃
+    // 正常结算会停止音频，可能使尚未结束的 play Promise 返回失败；不能再反向放弃。
+    if (!this.running || this.finishing || this.job.phase !== 'playing' || this.job.current?.jobId !== jobId) return;
     this.heart.stop();
+    void this.stopPlayer();
     void this.job.abandon('play_start_fail', detail);
   }
 
@@ -313,7 +342,7 @@ export class ClientRuntime {
       const r = await this.job.submitFinish({
         jobId: job.jobId, playedMs, positionMs, durationMs,
         playbackRate: 1, jumpCount: 0, backwardJumpCount: 0,
-        listenDriftMs: 0, recoveryAttempts: 0, stallDetected: false,
+        listenDriftMs: 0, recoveryAttempts: this.playRecoveryAttempts, stallDetected: false,
       });
       const secs = `（已播 ${Math.round(playedMs / 1000)}s / 目标 ${Math.round(job.targetMs / 1000)}s）`;
       this.log.push(r === 'settled' ? 'info' : 'warn', 'job_finish', `本单结算：${r}${secs}`, { playedMs, targetMs: job.targetMs });

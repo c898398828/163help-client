@@ -287,8 +287,8 @@ describe('ClientRuntime 主循环（docker 端关键路径）', () => {
   });
 });
 
-describe('心跳节奏与确认（协议：播放中每 10s 一次）', () => {
-  test('播放进度每秒回调不会每秒上报；10s 间隔上报最近一次进度', async (t) => {
+describe('心跳节奏与确认（首个真实进度立即上报，随后每 10s 一次）', () => {
+  test('首个进度立即上报，后续每秒回调只更新采样，10s 间隔上报最近一次进度', async (t) => {
     t.mock.timers.enable({ apis: ['setInterval', 'Date'] });
     const h = makeHarness({ timing: { idleMs: 20, noTargetMs: 20 } });
     try {
@@ -296,14 +296,15 @@ describe('心跳节奏与确认（协议：播放中每 10s 一次）', () => {
       await tick(20);
       for (let i = 1; i <= 5; i++) h.fireProgress(i * 1000, i * 1000, 300_000); // 播放器每秒回调一次 ×5
       await tick(20);
-      assert.equal(h.calls.heartbeat.length, 0, '进度回调本身不应立刻上报（否则 1 秒 1 次 = 协议 10 倍）');
+      assert.equal(h.calls.heartbeat.length, 1, '只有首个真实进度立即上报，后续采样不会每秒发请求');
+      assert.equal(h.calls.heartbeat[0]!.positionMs, 1000, '首心跳携带触发时的真实进度');
       t.mock.timers.tick(10_000);
       await tick(30);
-      assert.equal(h.calls.heartbeat.length, 1, '10s 上报一次');
-      assert.equal(h.calls.heartbeat[0]!.positionMs, 5000, '上报最近一次进度而非 0');
+      assert.equal(h.calls.heartbeat.length, 2, '10s 上报一次');
+      assert.equal(h.calls.heartbeat[1]!.positionMs, 5000, '上报最近一次进度而非 0');
       t.mock.timers.tick(10_000);
       await tick(30);
-      assert.equal(h.calls.heartbeat.length, 2, '再过 10s 再一次');
+      assert.equal(h.calls.heartbeat.length, 3, '再过 10s 再一次');
     } finally { cleanup(h); }
   });
 
@@ -314,14 +315,17 @@ describe('心跳节奏与确认（协议：播放中每 10s 一次）', () => {
       await h.runtime.start(true);
       await tick(20);
       h.fireProgress(1000, 1000, 300_000);
-      t.mock.timers.tick(10_000); // 第一次心跳：成功
-      await tick(30);
+      await tick(30); // 首个真实进度立即上报并确认成功。
       assert.equal(h.calls.heartbeat.length, 1);
       h.setHbOk(false); // 之后全部被拒（服务端 4xx / 无效）
-      t.mock.timers.tick(60_000);
-      await tick(60);
+      for (let i = 1; i <= 5; i++) {
+        t.mock.timers.tick(10_000);
+        h.fireProgress((i + 1) * 1000, (i + 1) * 1000, 300_000); // 采样持续，单独验证心跳被拒。
+        await tick(30);
+      }
       assert.equal(h.calls.abandon.length, 1, '应放弃本单，避免「本地看着正常、服务端根本没收到」');
       assert.equal(h.calls.abandon[0]!.reason, 'heartbeat_lost');
+      assert.match(h.calls.abandon[0]!.detail, /距上次有效心跳/, '应由确认中断触发，而非采样中断');
     } finally { cleanup(h); }
   });
 });
