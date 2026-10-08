@@ -1,16 +1,44 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 process.env.UI_PASSWORD = process.env.UI_PASSWORD || 'test-password';
 const { createStatusServer } = await import('../src/server.ts');
 
-async function start(state: Record<string, any>) {
-  const server = createStatusServer({ port: 0, state });
+async function start(state: Record<string, any>, staticDir?: string) {
+  const server = createStatusServer({ port: 0, state, staticDir });
   await once(server, 'listening');
   const { port } = server.address() as AddressInfo;
   return { server, base: `http://127.0.0.1:${port}` };
+}
+
+/** 临时静态目录：一张假图 + 一个非图片文件（后者不得被列出或提供） */
+function staticFixture(t: { after(fn: () => void): void }): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mh-static-'));
+  fs.writeFileSync(path.join(dir, 'background.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  fs.writeFileSync(path.join(dir, 'night.webp'), Buffer.from('RIFF'));
+  fs.writeFileSync(path.join(dir, 'notes.txt'), 'not an image');
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+/** 原始路径请求：fetch 会先规范化 /static/../x，无法用来验证服务端自身的防穿越 */
+function rawGet(base: string, rawPath: string): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer }> {
+  const { hostname, port } = new URL(base);
+  return new Promise((resolve, reject) => {
+    const req = http.request({ hostname, port, path: rawPath, method: 'GET' }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode || 0, headers: res.headers, body: Buffer.concat(chunks) }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 async function login(base: string): Promise<string> {
@@ -130,6 +158,56 @@ describe('docker 管理端 会话与状态', () => {
       const res = await fetch(base + '/api/state', { headers: { Cookie: cookie } });
       const body = await res.json();
       assert.deepEqual(body.lastApi, lastApi);
+    } finally { server.closeAllConnections(); server.close(); }
+  });
+});
+
+describe('docker 管理端 背景静态文件', () => {
+  test('静态目录里的图片按文件名提供，带类型与缓存头，无需登录', async (t) => {
+    const dir = staticFixture(t);
+    const { server, base } = await start({}, dir);
+    try {
+      const png = await rawGet(base, '/static/background.png');
+      assert.equal(png.status, 200);
+      assert.equal(png.headers['content-type'], 'image/png');
+      assert.match(String(png.headers['cache-control']), /max-age=\d+/);
+      assert.equal(png.body.length, 8);
+      const webp = await rawGet(base, '/static/night.webp');
+      assert.equal(webp.status, 200);
+      assert.equal(webp.headers['content-type'], 'image/webp');
+    } finally { server.closeAllConnections(); server.close(); }
+  });
+
+  test('非图片、不存在的文件与路径穿越一律 404', async (t) => {
+    const dir = staticFixture(t);
+    const { server, base } = await start({}, dir);
+    try {
+      for (const raw of ['/static/notes.txt', '/static/missing.png', '/static/../server.ts', '/static/%2e%2e/server.ts', '/static/..%2Fserver.ts', '/static/', '/static/%ZZ']) {
+        const res = await rawGet(base, raw);
+        assert.equal(res.status, 404, `${raw} 应为 404，实际 ${res.status}`);
+      }
+    } finally { server.closeAllConnections(); server.close(); }
+  });
+
+  test('页面模板嵌入背景列表（登录页与仪表页都要有，供预加载主题脚本使用）', async (t) => {
+    const dir = staticFixture(t);
+    const { server, base } = await start({}, dir);
+    try {
+      const anon = await (await fetch(base + '/')).text();
+      assert.match(anon, /MH_BACKGROUNDS\s*=\s*\["background\.png","night\.webp"\]/);
+      const cookie = await login(base);
+      const authed = await (await fetch(base + '/', { headers: { Cookie: cookie } })).text();
+      assert.match(authed, /MH_BACKGROUNDS\s*=\s*\["background\.png","night\.webp"\]/);
+      assert.ok(authed.includes('id="bgSelect"'), '仪表页应有背景选择控件');
+    } finally { server.closeAllConnections(); server.close(); }
+  });
+
+  test('静态目录不存在时服务照常启动，背景列表为空', async (t) => {
+    const { server, base } = await start({}, path.join(os.tmpdir(), 'mh-static-missing-' + process.pid));
+    try {
+      const html = await (await fetch(base + '/')).text();
+      assert.match(html, /MH_BACKGROUNDS\s*=\s*\[\]/);
+      assert.equal((await rawGet(base, '/static/background.png')).status, 404);
     } finally { server.closeAllConnections(); server.close(); }
   });
 });

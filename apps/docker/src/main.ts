@@ -286,8 +286,8 @@ state.onConfig = (patch: ConfigPatch) => serializeLifecycle(async () => {
 });
 
 async function main() {
-  // 先起管理端：浏览器/网络异常时仍能进 UI 看日志、改配置
-  createStatusServer({ port: Number(process.env.PORT || 3000), state });
+  // 先起管理端：浏览器/网络异常时仍能进 UI 看日志、改配置；STATIC_DIR 可覆盖背景图目录
+  createStatusServer({ port: Number(process.env.PORT || 3000), state, staticDir: process.env.STATIC_DIR });
   console.log('[main] 管理端 http://0.0.0.0:3000');
 
   await recoverBrowser();

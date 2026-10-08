@@ -45,6 +45,37 @@ describe('docker 管理端页面模板', () => {
     const missing = [...new Set(refs)].filter((id) => !authed.includes(`id="${id}"`));
     assert.deepEqual(missing, [], `脚本引用了模板中不存在的 id：${missing.join(', ')}`);
   });
+
+  test('外观设置：主题切换、背景选择与背景层都在模板里，背景列表来自服务端', () => {
+    const html = buildPage({ authed: true, configured: true, backgrounds: ['background.png', 'night.webp'] });
+    for (const marker of ['id="themeToggle"', 'id="themeSeg"', 'id="bgSelect"', 'id="bg"', 'data-theme']) {
+      assert.ok(html.includes(marker), `缺少 ${marker}`);
+    }
+    assert.match(html, /<option value="none">无<\/option>/);
+    assert.match(html, /<option value="background\.png">/);
+    assert.match(html, /<option value="night\.webp">/);
+    assert.match(html, /MH_BACKGROUNDS\s*=\s*\["background\.png","night\.webp"\]/);
+  });
+
+  test('主题/背景在 <head> 预先应用（刷新不闪色），登录页也套用', () => {
+    for (const html of [authed, buildPage({ authed: false, backgrounds: ['background.png'] })]) {
+      const head = html.slice(0, html.indexOf('<body'));
+      assert.ok(head.includes('mh.theme'), 'head 里应读取主题偏好');
+      assert.ok(head.includes('mh.bg'), 'head 里应读取背景偏好');
+      assert.ok(head.includes('MH_BACKGROUNDS'), 'head 里应内嵌背景列表');
+    }
+  });
+
+  test('背景文件名进脚本前转义，不能闭合 <script>', () => {
+    const html = buildPage({ authed: true, configured: true, backgrounds: ['a</script><b>.png'] });
+    assert.ok(!html.includes('["a</script>'), '文件名里的 </script> 必须转义');
+    assert.ok(!html.includes('value="a</script>'), 'option 里的文件名必须 HTML 转义');
+  });
+
+  test('壳层铺满视口（不再是居中的 1080px 盒子）', () => {
+    assert.ok(!/max-width:\s*1080px/.test(authed), '不应再有 1080px 居中限制');
+    assert.match(authed, /min-height:\s*100(?:dvh|vh)/);
+  });
 });
 
 test('/api/state 保留显式零额度，仅在缺省时使用默认额度', async (t) => {
