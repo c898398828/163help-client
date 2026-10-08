@@ -28,6 +28,7 @@ interface Hooks {
   start?: () => Promise<void>;
   save?: () => void;
   vipType?: number;
+  apiResponse?: (path: string) => unknown | Promise<unknown>;
 }
 
 /** 执行真实 main 源码，只替换外部 I/O；不导入 Playwright，也不启动服务器或真实定时器。 */
@@ -112,7 +113,7 @@ async function boot(hooks: Hooks = {}) {
     path, ClientRuntime: FakeRuntime, DockBrowser: FakeBrowser, applyConfigPatch, createTransport,
     createApi: (deps: any) => async (_method: string, url: string, _body?: unknown, token = deps.getToken()) => {
       requests.push({ path: url, token, vipType: deps.extraHeaders()['X-Vip-Type'] });
-      return { status: 200, payload: {} };
+      return hooks.apiResponse ? hooks.apiResponse(url) : { status: 200, payload: {} };
     },
     createStatusServer: () => { events.push('server:start'); },
     process: { env: { DATA_DIR: '/test-data', API_BASE: 'http://localhost' }, exit: (code: number) => events.push(`exit:${code}`) },
@@ -179,6 +180,39 @@ test('旧任务的异步进度读取不得回填到新任务', async () => {
   gate.resolve();
   await poll;
   assert.equal(app.runtime.progressSamples.length, 0);
+});
+
+test('心跳业务拒绝保留任务与原因，同因去重并在恢复后重新记录', async () => {
+  const app = await boot({ apiResponse: (url) => url.endsWith('/heartbeat')
+    ? { status: 200, payload: { ok: false, error: 'job_not_active' } }
+    : { status: 200, payload: {} } });
+  app.runtime.bus.emit('job:current', { jobId: 'a', musicName: 'one', targetMs: 310000 });
+  const rejected = () => app.state.logs.filter((l: any) => /心跳未获确认/.test(l.msg));
+  assert.equal(await app.transport.heartbeat('mh_ck_old', { jobId: 'a', positionMs: 1000 }), false);
+  await app.transport.heartbeat('mh_ck_old', { jobId: 'a', positionMs: 2000 });
+  assert.equal(rejected().length, 1);
+  assert.match(rejected()[0].msg, /任务 a/);
+  assert.match(rejected()[0].msg, /job_not_active/);
+  assert.doesNotMatch(rejected()[0].msg, /mh_ck_old|MUSIC_U/);
+  app.runtime.bus.emit('heartbeat:tick', { jobId: 'a', intervalMs: 10000, lastAtMs: 10000 });
+  await app.transport.heartbeat('mh_ck_old', { jobId: 'a', positionMs: 3000 });
+  assert.equal(rejected().length, 2, '恢复后再次失败应重新记录');
+});
+
+test('旧任务的迟到心跳拒绝不得显示为新任务故障', async () => {
+  const gate = deferred();
+  const app = await boot({ apiResponse: async (url) => {
+    if (!url.endsWith('/heartbeat')) return { status: 200, payload: {} };
+    await gate.promise;
+    return { status: 409, payload: null, error: 'job_not_active' };
+  } });
+  app.runtime.bus.emit('job:current', { jobId: 'a', musicName: 'one', targetMs: 1000 });
+  const pending = app.transport.heartbeat('mh_ck_old', { jobId: 'a' });
+  await flush();
+  app.runtime.bus.emit('job:current', { jobId: 'b', musicName: 'two', targetMs: 1000 });
+  gate.resolve();
+  assert.equal(await pending, false);
+  assert.equal(app.state.logs.some((l: any) => /心跳未获确认/.test(l.msg)), false);
 });
 
 test('清空配置先等待旧凭证的 suspend 完成，再落盘，且不重新启动任务', async () => {

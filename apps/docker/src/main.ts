@@ -169,9 +169,16 @@ async function refreshIdentity() {
   return ident;
 }
 
-const transport = createTransport({ api, getIdentity: refreshIdentity });
-
 let currentJobId: string | null = null;
+let lastHeartbeatFailure = '';
+const transport = createTransport({ api, getIdentity: refreshIdentity, onHeartbeatRejected: (failure) => {
+  if (!currentJobId || failure.jobId !== currentJobId) return;
+  const signature = `${failure.jobId}:${failure.status}:${failure.error}`;
+  if (signature === lastHeartbeatFailure) return;
+  lastHeartbeatFailure = signature;
+  pushLog('warn', `心跳未获确认：${failure.error}（HTTP ${failure.status} / 任务 ${failure.jobId}）`);
+} });
+
 const player = {
   play: async (musicId: string, durationMs: number) => {
     if (!browser) return { ok: false, err: '浏览器未就绪' };
@@ -199,7 +206,10 @@ const runtime = new ClientRuntime({ adapter: {
 
 runtime.bus.on('job:current', (j) => {
   const jobId = j?.jobId ?? null;
-  if (jobId !== currentJobId) state.hbIntervals = [];
+  if (jobId !== currentJobId) {
+    state.hbIntervals = [];
+    lastHeartbeatFailure = '';
+  }
   currentJobId = jobId;
   state.job = j ? { musicName: j.musicName, playedMs: 0, targetMs: j.targetMs } : null;
 });
@@ -207,6 +217,7 @@ runtime.bus.on('job:settled', (s) => { if (s.credited) state.jobsDone += 1; });
 runtime.bus.on('job:progress', (p) => { if (state.job) state.job.playedMs = p.playedMs; });
 runtime.bus.on('heartbeat:tick', (t) => {
   if (!currentJobId || t.jobId !== currentJobId) return;
+  lastHeartbeatFailure = '';
   state.hbIntervals.push(t.intervalMs);
   if (state.hbIntervals.length > 30) state.hbIntervals.shift();
 });

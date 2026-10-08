@@ -37,6 +37,14 @@ describe('浏览器操作有界等待', () => {
     assert.deepEqual(await db.play('1', 60_000), { ok: false, err: '歌曲地址不可用' });
   });
 
+  test('只给恢复成功透传 attempts，普通成功保持原有结果', async () => {
+    const db = new DockBrowser('/tmp', '');
+    (db as any).page = { evaluate: async () => ({ ok: true, attempts: 2 }) };
+    assert.deepEqual(await db.play('1', 60_000), { ok: true, err: undefined, attempts: 2 });
+    (db as any).page = { evaluate: async () => ({ ok: true }) };
+    assert.deepEqual(await db.play('2', 60_000), { ok: true, err: undefined });
+  });
+
   test('外层 evaluate 超时也返回带原因的失败', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     const db = new DockBrowser('/tmp', '');
@@ -194,6 +202,199 @@ describe('页内异步请求超时与歌曲失效', () => {
     assert.equal(player.audio.src, '');
   });
 
+  test('首次起播挂起 8s 后重新取流并重载媒体，只恢复一次', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+    const { player, requests } = playerWithRequests();
+    const firstPlay = deferred<void>();
+    const resets: string[] = [];
+    let plays = 0;
+    player.audio.play = () => ++plays === 1 ? firstPlay.promise : Promise.resolve();
+    player.audio.pause = () => { resets.push('pause'); };
+    player.audio.removeAttribute = (name: string) => { assert.equal(name, 'src'); player.audio.src = ''; resets.push('remove'); };
+    player.audio.load = () => { resets.push('load'); };
+    const pending = player.play('1');
+    requests[0]!.resolve(song('https://media.test/old?token=secret'));
+    await flush();
+    t.mock.timers.tick(8000);
+    await flush();
+    assert.equal(requests.length, 2, '起播临时挂起应重新获取一次地址');
+    assert.deepEqual(resets, ['pause', 'remove', 'load'], '必须真正中止旧媒体请求');
+    requests[1]!.resolve(song('https://media.test/fresh'));
+    const result = await pending;
+    assert.equal(result.ok, true);
+    assert.equal(result.attempts, 2);
+    assert.equal(plays, 2);
+    firstPlay.resolve();
+    await flush();
+    assert.equal(player.audio.src, 'https://media.test/fresh');
+  });
+
+  test('两次起播仍挂起时遵守原 20s 总时限，并保留清理前诊断', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+    const { player, requests } = playerWithRequests();
+    player.audio.play = () => new Promise(() => {});
+    player.audio.readyState = 2;
+    player.audio.networkState = 2;
+    player.audio.error = null;
+    player.audio.removeAttribute = () => { player.audio.src = ''; };
+    player.audio.load = () => { player.audio.readyState = 0; player.audio.networkState = 0; };
+    let result: any;
+    void player.play('1').then((value: unknown) => { result = value; });
+    requests[0]!.resolve(song('https://old.media.test/track?token=private-token'));
+    await flush();
+    t.mock.timers.tick(8000);
+    await flush();
+    assert.equal(requests.length, 2);
+    requests[1]!.resolve(song('https://fresh.media.test/track?token=private-token'));
+    await flush();
+    player.audio.readyState = 2;
+    player.audio.networkState = 2;
+    t.mock.timers.tick(11999);
+    await flush();
+    assert.equal(result, undefined);
+    t.mock.timers.tick(1);
+    await flush();
+    assert.equal(result.ok, false);
+    assert.match(result.err, /attempt=2/);
+    assert.match(result.err, /audio\.play=12000ms/);
+    assert.match(result.err, /readyState=2/);
+    assert.match(result.err, /networkState=2/);
+    assert.match(result.err, /sourceHost=fresh\.media\.test/);
+    assert.doesNotMatch(result.err, /private-token|https:\/\//);
+    assert.equal(player.audio.src, '');
+    assert.equal(requests.length, 2);
+  });
+
+  test('取流 18s 后只等起播 2s：诊断分开计时，不能再延长总预算', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+    const { player, requests } = playerWithRequests();
+    player.audio.play = () => new Promise(() => {});
+    let result: any;
+    void player.play('1').then((value: unknown) => { result = value; });
+    t.mock.timers.tick(18000);
+    requests[0]!.resolve(song('https://media.test/song'));
+    await flush();
+    t.mock.timers.tick(2000);
+    await flush();
+    assert.equal(result.ok, false);
+    assert.match(result.err, /fetch=18000ms/);
+    assert.match(result.err, /audio\.play=2000ms/);
+    assert.equal(requests.length, 1);
+  });
+
+  for (const name of ['NotAllowedError', 'NotSupportedError']) {
+    test(`${name} 明确失败不重取地址`, async () => {
+      const { player, requests } = playerWithRequests();
+      player.audio.play = () => Promise.reject(Object.assign(new Error('blocked'), { name }));
+      const pending = player.play('1');
+      requests[0]!.resolve(song('https://media.test/song'));
+      assert.equal((await pending).ok, false);
+      assert.equal(requests.length, 1);
+    });
+  }
+
+  for (const code of [1, 3, 4]) {
+    test(`媒体错误码 ${code} 不按起播超时恢复`, async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+      const { player, requests } = playerWithRequests();
+      player.audio.play = () => new Promise(() => {});
+      player.audio.error = { code };
+      const pending = player.play('1');
+      requests[0]!.resolve(song('https://media.test/song'));
+      await flush();
+      t.mock.timers.tick(8000);
+      await flush();
+      const result = await pending;
+      assert.equal(result.ok, false);
+      assert.match(result.err, new RegExp(`mediaError=${code}`));
+      assert.equal(requests.length, 1);
+    });
+  }
+
+  test('明确网络起播错误只重新取流一次', async () => {
+    const { player, requests } = playerWithRequests();
+    let plays = 0;
+    player.audio.play = () => ++plays === 1
+      ? Promise.reject(Object.assign(new Error('network unavailable'), { name: 'NetworkError' }))
+      : Promise.resolve();
+    const pending = player.play('1');
+    requests[0]!.resolve(song('https://media.test/old'));
+    await flush();
+    assert.equal(requests.length, 2);
+    requests[1]!.resolve(song('https://media.test/fresh'));
+    assert.equal((await pending).ok, true);
+    assert.equal(plays, 2);
+  });
+
+  test('连续网络起播错误最多尝试两次，错误消息中的签名 URL 也隐藏', async () => {
+    const { player, requests } = playerWithRequests();
+    player.audio.error = { code: 2 };
+    player.audio.play = () => Promise.reject(new Error('network failed: https://media.test/song?token=private-token'));
+    const pending = player.play('1');
+    requests[0]!.resolve(song('https://media.test/first?token=private-token'));
+    await flush();
+    assert.equal(requests.length, 2);
+    requests[1]!.resolve(song('https://media.test/second?token=private-token'));
+    const result = await pending;
+    assert.equal(result.ok, false);
+    assert.equal(requests.length, 2);
+    assert.match(result.err, /mediaError=2/);
+    assert.doesNotMatch(result.err, /private-token|https:\/\//);
+  });
+
+  test('audio.play Promise 挂起但已有正进度时保留当前播放，不从头恢复', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+    const { player, requests } = playerWithRequests();
+    player.audio.play = () => new Promise(() => {});
+    const pending = player.play('1');
+    requests[0]!.resolve(song('https://media.test/song'));
+    await flush();
+    player.audio.currentTime = 3;
+    player.audio.paused = false;
+    t.mock.timers.tick(8000);
+    await flush();
+    assert.equal(requests.length, 1);
+    assert.equal((await pending).ok, true);
+    assert.equal(player.audio.src, 'https://media.test/song');
+  });
+
+  for (const cancelAt of ['first-play', 'retry-fetch'] as const) {
+    test(`停止于 ${cancelAt} 后不得重试或接受迟到地址`, async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+      const { player, requests } = playerWithRequests();
+      player.audio.play = () => new Promise(() => {});
+      const pending = player.play('1');
+      requests[0]!.resolve(song('https://media.test/old'));
+      await flush();
+      if (cancelAt === 'retry-fetch') { t.mock.timers.tick(8000); await flush(); assert.equal(requests.length, 2); }
+      player.stop();
+      if (requests[1]) requests[1].resolve(song('https://media.test/late'));
+      t.mock.timers.tick(20000);
+      await flush();
+      assert.equal((await pending).ok, false);
+      assert.equal(player.audio.src, '');
+      assert.equal(requests.length, cancelAt === 'first-play' ? 1 : 2);
+    });
+  }
+
+  test('A 的起播子超时不能重置或重试已开始的 B', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+    const { player, requests } = playerWithRequests();
+    player.audio.play = () => new Promise(() => {});
+    const old = player.play('1');
+    requests[0]!.resolve(song('https://media.test/a'));
+    await flush();
+    player.audio.play = async () => {};
+    const fresh = player.play('2');
+    requests[1]!.resolve(song('https://media.test/b'));
+    assert.equal((await fresh).ok, true);
+    t.mock.timers.tick(20000);
+    await flush();
+    assert.equal((await old).ok, false);
+    assert.equal(requests.length, 2);
+    assert.equal(player.audio.src, 'https://media.test/b');
+  });
+
   test('歌曲地址不可用时返回可读原因', async () => {
     const { player, requests } = playerWithRequests();
     const pending = player.play('1');
@@ -201,6 +402,7 @@ describe('页内异步请求超时与歌曲失效', () => {
     const result = await pending;
     assert.equal(result.ok, false);
     assert.match(String(result.err), /歌曲地址不可用/);
+    assert.equal(requests.length, 1);
   });
 
   test('音频加载失败返回失败且清理当前音频', async () => {
