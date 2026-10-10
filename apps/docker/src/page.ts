@@ -87,8 +87,8 @@ body{font:13px/1.55 var(--sans);color:var(--t1);background:var(--bg);min-height:
 @keyframes drift3{to{transform:translate(-14vw,-10vh) scale(1.16)}}
 /* ---- 玻璃面板 ---- */
 .glass{background:var(--glass);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow),inset 0 1px 0 var(--glass-top);backdrop-filter:blur(var(--blur)) saturate(1.3);-webkit-backdrop-filter:blur(var(--blur)) saturate(1.3)}
-/* ---- 壳层：铺满视口 ---- */
-.shell{position:relative;z-index:1;display:flex;min-height:100dvh}
+/* ---- 壳层：铺满视口（固定视口高，日志面板才能「吃掉剩余高度」内部滚动） ---- */
+.shell{position:relative;z-index:1;display:flex;height:100dvh;min-height:100dvh;overflow:hidden}
 .side{width:212px;flex:0 0 212px;position:sticky;top:0;height:100dvh;display:flex;flex-direction:column;gap:4px;padding:18px 12px 14px;background:var(--glass2);backdrop-filter:blur(var(--blur)) saturate(1.3);-webkit-backdrop-filter:blur(var(--blur)) saturate(1.3);border-right:1px solid var(--line)}
 .logo{display:flex;align-items:center;gap:10px;padding:4px 8px 18px;font-weight:800;font-size:14px;letter-spacing:.02em;white-space:nowrap}
 .logo-ic{width:28px;height:28px;border-radius:9px;background:linear-gradient(135deg,var(--red),var(--red2));color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;box-shadow:0 4px 14px rgba(236,65,65,.35);transition:box-shadow .3s ease}
@@ -102,7 +102,7 @@ body{font:13px/1.55 var(--sans);color:var(--t1);background:var(--bg);min-height:
 .side .foot b{color:var(--red2);cursor:pointer;font-weight:600;font-family:inherit}
 .tbtn{display:inline-flex;align-items:center;gap:6px;width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:var(--rs);background:var(--glass);color:var(--t2);font:inherit;font-size:12px;cursor:pointer;transition:border-color .18s ease,color .18s ease,transform .18s var(--ease)}
 .tbtn:hover{color:var(--t1);border-color:var(--t3);transform:translateY(-1px)}
-.main{flex:1;min-width:0;display:flex;flex-direction:column;padding:18px 22px 22px}
+.main{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;padding:18px 22px 22px;overflow:hidden}
 .view{display:flex;flex-direction:column;gap:14px;flex:1;min-height:0}
 .view.rise{animation:rise .28s var(--ease) both}
 @keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
@@ -163,7 +163,7 @@ body{font:13px/1.55 var(--sans);color:var(--t1);background:var(--bg);min-height:
 .follow{font-size:11px;color:var(--t3);cursor:pointer;font-family:var(--mono);padding:4px 10px;border:1px solid transparent;border-radius:999px}
 .follow:hover{border-color:var(--line);color:var(--t2)}
 .follow.paused{color:var(--warn);border-color:rgba(245,185,63,.35)}
-.log{background:var(--log);border:1px solid var(--line2);border-radius:12px;padding:8px 4px 8px 0;overflow:auto;font-family:var(--mono);font-size:11.5px;line-height:1.75;flex:1;min-height:160px}
+.log{background:var(--log);border:1px solid var(--line2);border-radius:12px;padding:8px 4px 8px 0;overflow:auto;font-family:var(--mono);font-size:11.5px;line-height:1.75;flex:1;min-height:0}
 .lrow{display:flex;gap:10px;padding:1px 12px;border-left:2px solid transparent}
 .lrow:hover{background:var(--hover)}
 .lrow.new{animation:rowin .36s var(--ease) both}
@@ -206,7 +206,8 @@ button{font:inherit}
 .login-card .logo{padding:0 0 16px}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 @media (max-width:720px){
-  .shell{flex-direction:column}
+  /* 窄屏改为纵向堆叠：回到整页自然滚动，避免日志区被压到看不见 */
+  .shell{flex-direction:column;height:auto;min-height:100dvh;overflow:visible}
   .side{width:100%;flex:none;position:static;height:auto;flex-direction:row;align-items:center;gap:2px;padding:8px;overflow-x:auto;scrollbar-width:none;border-right:none;border-bottom:1px solid var(--line)}
   .side::-webkit-scrollbar{display:none}
   .logo{padding:0 10px 0 4px}
@@ -214,7 +215,7 @@ button{font:inherit}
   .nav{white-space:nowrap}
   .cards{grid-template-columns:1fr 1fr}
   .row2{grid-template-columns:1fr}
-  .main{padding:12px}
+  .main{padding:12px;overflow:visible}
   .now-name{font-size:22px}
 }
 </style></head><body>
