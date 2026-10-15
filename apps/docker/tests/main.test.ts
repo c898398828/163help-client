@@ -23,11 +23,12 @@ interface Hooks {
   suspend?: () => Promise<void>;
   setCookie?: () => Promise<void>;
   stop?: () => Promise<void>;
-  progress?: () => Promise<{ playedMs: number; durationMs: number }>;
+  progress?: () => Promise<{ playedMs: number; durationMs: number; positionMs?: number; ended?: boolean; evidence?: Record<string, number | boolean> }>;
   play?: () => Promise<unknown>;
   start?: () => Promise<void>;
   save?: () => void;
   vipType?: number;
+  identityWait?: () => Promise<void>;
   apiResponse?: (path: string) => unknown | Promise<unknown>;
 }
 
@@ -46,13 +47,17 @@ async function boot(hooks: Hooks = {}) {
   class FakeBrowser {
     cookie: string;
     closed = false;
+    dead = false;
     cookieChanges: string[] = [];
-    disconnected: Array<() => void> = [];
+    unavailable: Array<(reason: string) => void> = [];
     constructor(_dir: string, cookie: string) { this.cookie = cookie; browsers.push(this); }
     async launch() { events.push(`launch:${this.cookie}`); await hooks.launch?.(); }
     async close() { this.closed = true; events.push('close'); this.disconnect(); }
-    onDisconnect(cb: () => void) { this.disconnected.push(cb); }
-    disconnect() { for (const cb of this.disconnected) cb(); }
+    onUnavailable(cb: (reason: string) => void) { this.unavailable.push(cb); }
+    disconnect() { this.dead = true; for (const cb of this.unavailable) cb('浏览器进程已断开'); }
+    /** 渲染进程崩溃：浏览器进程还在，browser 字段仍非空 */
+    crash() { this.dead = true; for (const cb of this.unavailable) cb('渲染进程崩溃'); }
+    isUsable() { return !this.dead; }
     async setCookie(cookie: string) {
       this.cookieChanges.push(cookie);
       events.push(`cookie:${cookie}`);
@@ -61,6 +66,7 @@ async function boot(hooks: Hooks = {}) {
     }
     async identity() {
       events.push(`identity:${this.cookie}`);
+      await hooks.identityWait?.();
       return { id: '123', name: 'test', vipType: hooks.vipType ?? 11 };
     }
     async stop() { events.push('player:stop'); await hooks.stop?.(); events.push('player:stopped'); }
@@ -70,6 +76,7 @@ async function boot(hooks: Hooks = {}) {
   class FakeRuntime {
     starts = 0;
     progressSamples: number[] = [];
+    observations: any[][] = [];
     suspends: Array<{ reason: string; token: string }> = [];
     deps: any;
     handlers = new Map<string, Array<(payload: any) => void>>();
@@ -81,10 +88,14 @@ async function boot(hooks: Hooks = {}) {
       },
       emit: (event: string, payload: any) => { for (const fn of this.handlers.get(event) ?? []) fn(payload); },
     };
-    constructor(deps: any) { this.deps = deps; deps.player.onProgress((playedMs: number) => this.progressSamples.push(playedMs)); }
+    constructor(deps: any) {
+      this.deps = deps;
+      deps.player.onProgress((...sample: any[]) => { this.progressSamples.push(sample[0]); this.observations.push(sample); });
+    }
     async start(autostart: boolean) {
       assert.equal(autostart, true);
       this.starts += 1;
+      this.bus.emit('runtime:blocked', null);
       events.push(`start:${this.deps.adapter.storage.getToken()}`);
       await hooks.start?.();
       await this.deps.transport.me();
@@ -153,6 +164,54 @@ test('jobsDone 只计入 credited 的 job:settled，不把放弃或清空当作�
   assert.equal(app.state.jobsDone, 0);
   app.runtime.bus.emit('job:settled', { jobId: 'b', credited: true });
   assert.equal(app.state.jobsDone, 1);
+});
+
+test('任务失效阻断保留在状态中，自动浏览器恢复不解除，手动保存后恢复', async () => {
+  const app = await boot();
+  const blocked = { code: 'job_not_active', jobId: 'expired-job' };
+  app.runtime.bus.emit('runtime:blocked', blocked);
+  app.runtime.bus.emit('job:current', null);
+  assert.deepEqual(app.state.runtimeBlocked, blocked);
+  app.browsers[0]!.disconnect();
+  await flush();
+  await app.fire(5000);
+  assert.equal(app.runtime.starts, 1, '自动重建浏览器不得触发新一轮无效播放');
+  assert.deepEqual(app.state.runtimeBlocked, blocked);
+  await app.state.onConfig({ key: initialConfig.clientKey });
+  assert.equal(app.runtime.starts, 2);
+  assert.equal(app.state.runtimeBlocked, null);
+});
+
+test('真实有效时长、媒体位置、结束标志与证据分别传给 core', async () => {
+  const evidence = { playbackRate: 2, jumpCount: 1, backwardJumpCount: 0, listenDriftMs: 9000, stallDetected: false };
+  const app = await boot({ progress: async () => ({ playedMs: 1000, positionMs: 10000, durationMs: 310000, ended: false, evidence }) });
+  app.runtime.bus.emit('job:current', { jobId: 'a', musicName: 'one', targetMs: 310000 });
+  await app.fire(1000);
+  assert.equal(JSON.stringify(app.runtime.observations), JSON.stringify([[1000, 10000, 310000, { ...evidence, ended: false }]]));
+});
+
+test('配置恢复等候身份期间发生的新任务失效，不得被迟到启动解除', async () => {
+  const hooks: Hooks = {};
+  const app = await boot(hooks);
+  const gate = deferred();
+  hooks.identityWait = () => gate.promise;
+  const pending = app.state.onConfig({ key: initialConfig.clientKey });
+  await flush();
+  const blocked = { code: 'job_not_active', jobId: 'newly-expired-job' };
+  app.runtime.bus.emit('runtime:blocked', blocked);
+  gate.resolve();
+  await pending;
+  assert.equal(app.runtime.starts, 1);
+  assert.deepEqual(app.state.runtimeBlocked, blocked);
+});
+
+test('零有效时长的曲终仍上报，让 core 拒绝试听或跳播而非无限等候', async () => {
+  const app = await boot({ progress: async () => ({ playedMs: 0, positionMs: 30000, durationMs: 30000, ended: true }) });
+  app.runtime.bus.emit('job:current', { jobId: 'a', musicName: 'one', targetMs: 310000 });
+  await app.fire(1000);
+  assert.equal(app.runtime.observations.length, 1);
+  assert.equal(app.runtime.observations[0]![0], 0);
+  assert.equal(app.runtime.observations[0]![3].ended, true);
 });
 
 test('切换任务清空心跳样本，旧任务的迟到心跳不得污染新任务', async () => {
@@ -355,6 +414,36 @@ test('断开后的待重连回调不得在用户清空配置后重启任务', as
   assert.equal(app.runtime.starts, 1);
   assert.equal(app.browsers.length, 1);
   assert.equal(app.state.configured, false);
+});
+
+test('渲染进程崩溃后自动重建浏览器并恢复任务（不再卡在僵尸状态）', async () => {
+  const app = await boot();
+  assert.equal(app.browsers.length, 1);
+  app.browsers[0]!.crash();
+  await flush();
+  assert.equal(app.state.browserReady, false, '崩溃后不能再对外声称浏览器就绪');
+  assert.match(String(app.state.logs.at(-1)!.msg), /渲染进程崩溃/);
+  await app.fire(5000);
+  assert.equal(app.browsers.length, 2, '崩溃后必须重建浏览器');
+  assert.equal(app.runtime.starts, 2, '重建后应恢复任务循环');
+  assert.equal(app.state.browserReady, true);
+});
+
+test('兜底巡检拆掉已不可用的浏览器实例（崩溃信号漏接也能自愈）', async () => {
+  const app = await boot();
+  app.browsers[0]!.dead = true; // 只标记不可用，不触发回调：模拟事件没接住
+  await app.fire(60_000);
+  assert.equal(app.browsers[0]!.closed, true, '已死的实例必须先拆掉');
+  assert.equal(app.browsers.length, 2);
+  assert.equal(app.runtime.starts, 2);
+});
+
+test('已不可用的浏览器实例不会被当成「浏览器还在」，兜底巡检不重复重建', async () => {
+  const app = await boot();
+  app.browsers[0]!.dead = true;
+  await app.fire(60_000);
+  await app.fire(60_000);
+  assert.equal(app.browsers.length, 2, '第二次巡检不应再建一个');
 });
 
 test('浏览器启动 single-flight，重入调用复用同一次启动', async () => {

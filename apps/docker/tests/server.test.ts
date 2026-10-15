@@ -160,6 +160,16 @@ describe('docker 管理端 会话与状态', () => {
       assert.deepEqual(body.lastApi, lastApi);
     } finally { server.closeAllConnections(); server.close(); }
   });
+
+  test('/api/state 透出任务失效后的阻断原因', async () => {
+    const runtimeBlocked = { code: 'job_not_active', jobId: 'expired-job' };
+    const { server, base } = await start({ runtimeBlocked });
+    try {
+      const cookie = await login(base);
+      const res = await fetch(base + '/api/state', { headers: { Cookie: cookie } });
+      assert.deepEqual((await res.json()).runtimeBlocked, runtimeBlocked);
+    } finally { server.closeAllConnections(); server.close(); }
+  });
 });
 
 describe('docker 管理端 背景静态文件', () => {

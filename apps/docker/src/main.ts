@@ -38,6 +38,7 @@ const state: Record<string, any> = {
   configured: Boolean(String(boot.neteaseCookie || '').trim() && String(boot.clientKey || '').trim()),
   browserReady: false,
   authStatus: '',
+  runtimeBlocked: null as { code: string; jobId: string } | null,
   lastApi: null as { ok: boolean; status: number; at: number } | null,
   lastApiWasOk: true,
   job: null as { musicName: string; playedMs: number; targetMs: number } | null,
@@ -128,12 +129,12 @@ async function launchBrowser(): Promise<boolean> {
       await b.launch();
       browser = b;
       state.browserReady = true;
-      b.onDisconnect(() => {
+      b.onUnavailable((reason) => {
         if (browser !== b) return; // 已被替换或主动关闭
         browser = null;
         state.browserReady = false;
         vipTypeCache = 0;
-        pushLog('error', '浏览器已断开（崩溃或被杀），暂停任务后自动重连');
+        pushLog('error', `浏览器已不可用（${reason}），暂停任务后自动重连`);
         void serializeLifecycle(async () => {
           // 排队期间配置可能已恢复新实例或清空；旧回调只清理旧浏览器，不暂停新任务。
           const ownsRecovery = !browser && state.configured;
@@ -186,14 +187,16 @@ const player = {
     catch (e) { return { ok: false, err: e instanceof Error ? e.message : String(e) }; }
   },
   stop: async () => { try { await browser?.stop(); } catch { /* 页面可能已关闭 */ } },
-  onProgress: (cb: (playedMs: number, positionMs: number, durationMs: number) => void) => {
+  onProgress: (cb: (playedMs: number, positionMs: number, durationMs: number, observation?: import('../../../packages/core/src/types.ts').PlaybackObservation) => void) => {
     setInterval(async () => {
       const b = browser;
       const jobId = currentJobId;
       if (!b || !jobId) return;
       try {
         const p = await b.progress();
-        if (browser === b && currentJobId === jobId && p.playedMs > 0) cb(p.playedMs, p.playedMs, p.durationMs);
+        if (browser === b && currentJobId === jobId && (p.playedMs > 0 || p.ended)) {
+          cb(p.playedMs, p.positionMs ?? p.playedMs, p.durationMs, { ...p.evidence, ended: p.ended });
+        }
       } catch { /* 页面繁忙或任务已切换 */ }
     }, 1000);
   },
@@ -214,6 +217,7 @@ runtime.bus.on('job:current', (j) => {
   state.job = j ? { musicName: j.musicName, playedMs: 0, targetMs: j.targetMs } : null;
 });
 runtime.bus.on('job:settled', (s) => { if (s.credited) state.jobsDone += 1; });
+runtime.bus.on('runtime:blocked', (failure) => { state.runtimeBlocked = failure; });
 runtime.bus.on('job:progress', (p) => { if (state.job) state.job.playedMs = p.playedMs; });
 runtime.bus.on('heartbeat:tick', (t) => {
   if (!currentJobId || t.jobId !== currentJobId) return;
@@ -233,19 +237,33 @@ runtime.bus.on('limits:updated', (s) => {
 runtime.bus.on('log:append', (e) => { pushLog(e.level, e.msg); });
 
 /** 恢复任务前先刷新 VIP，保证首个 /me、/next 已带当前网易云账号等级。 */
-async function startConfiguredRuntime(): Promise<void> {
+async function startConfiguredRuntime(resumeBlocked = false): Promise<void> {
   if (!state.configured) return;
+  if (state.runtimeBlocked && !resumeBlocked) return;
+  const blockedAtStart = state.runtimeBlocked;
   const b = browser;
   if (!b) throw new Error('浏览器未就绪，无法启动任务');
   await refreshIdentity();
   if (browser !== b) throw new Error('浏览器已断开，无法启动任务');
+  // 等待身份期间新发生的任务失效，需要下一次明确恢复；旧启动不能覆盖它。
+  if (state.runtimeBlocked && (!resumeBlocked || state.runtimeBlocked !== blockedAtStart)) return;
   await runtime.start(true);
   if (browser !== b) throw new Error('浏览器已断开，任务启动未完成');
 }
 
 async function recoverBrowser(): Promise<void> {
   await serializeLifecycle(async () => {
-    if (!state.configured || browser) return;
+    if (!state.configured || browser?.isUsable()) return;
+    // 渲染进程崩溃后 browser 字段仍非空但页面已死：不先拆掉，这里会永远提前返回，
+    // 客户端就卡在「每 3s 领一单、立刻失败、再领下一单」的僵尸循环里。
+    if (browser) {
+      const dead = browser;
+      browser = null;
+      state.browserReady = false;
+      vipTypeCache = 0;
+      pushLog('warn', '浏览器实例已不可用，重建中');
+      try { await dead.close(); } catch { /* 已不可用 */ }
+    }
     if (await launchBrowser()) await startConfiguredRuntime();
   }).catch((e) => pushLog('error', '浏览器恢复失败：' + String(e)));
 }
@@ -267,6 +285,7 @@ state.onConfig = (patch: ConfigPatch) => serializeLifecycle(async () => {
   if (cookieChanged) vipTypeCache = 0;
   if (!state.configured) {
     state.acctName = ''; state.credits = 0; state.authStatus = 'logged_out';
+    state.runtimeBlocked = null;
   }
   try {
     if (!cookie) {
@@ -286,7 +305,7 @@ state.onConfig = (patch: ConfigPatch) => serializeLifecycle(async () => {
     } else if (!browser && !(await launchBrowser())) {
       throw new Error('浏览器启动失败，配置尚未应用');
     }
-    await startConfiguredRuntime();
+    await startConfiguredRuntime(true);
   } catch (e) {
     await runtime.suspend('config_apply_failed');
     pushLog('error', '配置应用失败：' + String(e));

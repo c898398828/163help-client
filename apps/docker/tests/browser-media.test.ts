@@ -11,8 +11,8 @@ import { DockBrowser, PAGE_HELPER } from '../src/browser.ts';
 const executablePath = process.env.PW_EXECUTABLE || chromium.executablePath();
 const skip = existsSync(executablePath) ? false : '需要已安装的 Chromium，可通过 PW_EXECUTABLE 指定';
 
-function silentWav() {
-  const samples = 8000 * 30;
+function silentWav(seconds = 30) {
+  const samples = 8000 * seconds;
   const data = Buffer.alloc(44 + samples * 2);
   data.write('RIFF', 0); data.writeUInt32LE(data.length - 8, 4); data.write('WAVEfmt ', 8);
   data.writeUInt32LE(16, 16); data.writeUInt16LE(1, 20); data.writeUInt16LE(1, 22);
@@ -22,8 +22,8 @@ function silentWav() {
   return data;
 }
 
-async function fixture(t: any, firstSource: 'ready' | 'stalled' | 'missing') {
-  const audio = silentWav();
+async function fixture(t: any, firstSource: 'ready' | 'stalled' | 'missing', duration = 30) {
+  const audio = silentWav(duration);
   let urlRequests = 0, stalledClosed = 0;
   const server = http.createServer((req, res) => {
     const url = new URL(req.url || '/', 'http://localhost');
@@ -31,7 +31,7 @@ async function fixture(t: any, firstSource: 'ready' | 'stalled' | 'missing') {
       const first = ++urlRequests === 1;
       const source = first && firstSource !== 'ready' ? firstSource : 'ready';
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=600' });
-      res.end(JSON.stringify({ data: [{ url: `${base}/${source}.wav?token=private-fixture-token`, duration: 30 }] }));
+      res.end(JSON.stringify({ data: [{ url: `${base}/${source}.wav?token=private-fixture-token`, duration }] }));
     } else if (url.pathname === '/stalled.wav') {
       res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': audio.length });
       res.flushHeaders(); // 有响应头但永远没有音频数据，模拟 CDN 起播挂起。
@@ -99,4 +99,24 @@ test('真实 Chromium：不可用音源明确失败，不重复领取地址或�
   assert.equal(stats().urlRequests, 1);
   assert.match(result.err || '', /sourceHost=127\.0\.0\.1/);
   assert.doesNotMatch(result.err || '', /private-fixture-token|token=/);
+});
+
+test('真实 Chromium：本地音源 1x 连续采样至自然结束，有效时长没有持续采样损耗', { skip, timeout: 15000 }, async (t) => {
+  const { page, player } = await fixture(t, 'ready', 2);
+  assert.equal((await player.play('song:1', 2000)).ok, true);
+  await page.evaluate(() => {
+    const timer = setInterval(() => {
+      const p = (window as any).__mhPlayer.progress();
+      if (p.ended) clearInterval(timer);
+    }, 40);
+  });
+  await page.waitForFunction(() => (window as any).__mhPlayer.audio.ended, undefined, { timeout: 10000 });
+  const p = await player.progress();
+  assert.equal(p.ended, true);
+  assert.equal(p.positionMs, 2000);
+  assert.equal(p.durationMs, 2000);
+  assert.ok(p.playedMs >= 1950 && p.playedMs <= 2000, `实际播放应接近 2s，得到 ${p.playedMs}ms`);
+  assert.equal(p.evidence?.jumpCount, 0);
+  assert.equal(p.evidence?.playbackRate, 1);
+  assert.equal(p.evidence?.stallDetected, false);
 });

@@ -99,7 +99,7 @@ describe('ClientRuntime 主循环（docker 端关键路径）', () => {
     } finally { cleanup(h); }
   });
 
-  test('歌曲先于目标播完 → 也结算，避免永久卡单', async () => {
+  test('音源明显先于目标播完 → 放弃不足播放，不能提交成功结算', async () => {
     const h = makeHarness({ next: { musicId: 'song:9', jobId: 'j9', targetDurationMs: 600_000, owner: { displayName: '乙' } } });
     try {
       await h.runtime.start(true);
@@ -109,8 +109,10 @@ describe('ClientRuntime 主循环（docker 端关键路径）', () => {
       assert.equal(h.calls.finish.length, 0);
       h.fireProgress(240_000, 240_000, 240_000); // 歌曲播完
       await tick();
-      assert.equal(h.calls.finish.length, 1);
-      assert.equal(h.calls.finish[0]!.jobId, 'j9');
+      assert.equal(h.calls.finish.length, 0);
+      assert.equal(h.calls.abandon.length, 1);
+      assert.equal(h.calls.abandon[0]!.reason, 'insufficient_playback');
+      assert.equal(h.runtime.job.current, null);
     } finally { cleanup(h); }
   });
 

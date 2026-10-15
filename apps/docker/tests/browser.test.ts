@@ -45,6 +45,25 @@ describe('浏览器操作有界等待', () => {
     assert.deepEqual(await db.play('2', 60_000), { ok: true, err: undefined });
   });
 
+  test('进度透传位置、自然结束和真实证据，过滤非有限或无效字段', async () => {
+    const db = new DockBrowser('/tmp', '');
+    (db as any).page = { evaluate: async () => ({
+      playedMs: 500, positionMs: 1500, durationMs: 3000, ended: true,
+      evidence: { playbackRate: 2, jumpCount: 1, backwardJumpCount: 0, listenDriftMs: 1000, stallDetected: false },
+    }) };
+    assert.deepEqual(await db.progress(), {
+      playedMs: 500, positionMs: 1500, durationMs: 3000, ended: true,
+      evidence: { playbackRate: 2, jumpCount: 1, backwardJumpCount: 0, listenDriftMs: 1000, stallDetected: false },
+    });
+    (db as any).page = { evaluate: async () => ({
+      playedMs: Infinity, positionMs: NaN, durationMs: -1, ended: 'true',
+      evidence: { playbackRate: Infinity, jumpCount: -1, backwardJumpCount: '1', listenDriftMs: -200, stallDetected: 'true' },
+    }) };
+    assert.deepEqual(await db.progress(), {
+      playedMs: 0, positionMs: 0, durationMs: 0, ended: false, evidence: { listenDriftMs: -200 },
+    });
+  });
+
   test('外层 evaluate 超时也返回带原因的失败', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     const db = new DockBrowser('/tmp', '');
@@ -415,7 +434,7 @@ describe('页内异步请求超时与歌曲失效', () => {
   });
 });
 
-describe('DockBrowser.onDisconnect', () => {
+describe('DockBrowser.onUnavailable', () => {
   test('Playwright 断开事件触发回调', () => {
     const handlers: Record<string, Array<() => void>> = {};
     const db = new DockBrowser('/tmp', '');
@@ -423,14 +442,58 @@ describe('DockBrowser.onDisconnect', () => {
       on: (ev: string, fn: () => void) => { (handlers[ev] ||= []).push(fn); },
     };
     let called = 0;
-    db.onDisconnect(() => { called += 1; });
+    db.onUnavailable(() => { called += 1; });
     handlers['disconnected']?.forEach((f) => f());
     assert.equal(called, 1);
   });
 
   test('未启动浏览器时调用安全（不抛错）', () => {
     const db = new DockBrowser('/tmp', '');
-    assert.doesNotThrow(() => db.onDisconnect(() => {}));
+    assert.doesNotThrow(() => db.onUnavailable(() => {}));
+  });
+
+  test('渲染进程 crash 事件触发回调：浏览器进程仍存活，disconnected 不会来', () => {
+    const handlers: Record<string, Array<() => void>> = {};
+    const db = new DockBrowser('/tmp', '');
+    (db as any).page = { on: (ev: string, fn: () => void) => { (handlers[ev] ||= []).push(fn); } };
+    const reasons: string[] = [];
+    db.onUnavailable((reason) => { reasons.push(reason); });
+    assert.equal(handlers['crash']?.length, 1, '必须监听 page 的 crash 事件');
+    handlers['crash']!.forEach((f) => f());
+    assert.equal(reasons.length, 1);
+    assert.equal(db.isUsable(), false, '渲染进程崩溃后浏览器实例不再可用');
+  });
+
+  test('evaluate 抛 Target crashed 时标记不可用，不再当作一次普通播放失败', async () => {
+    const db = new DockBrowser('/tmp', '');
+    (db as any).page = { evaluate: () => Promise.reject(new Error('page.evaluate: Target crashed')) };
+    const reasons: string[] = [];
+    db.onUnavailable((reason) => { reasons.push(reason); });
+    const result = await db.play('1', 60_000);
+    assert.equal(result.ok, false);
+    assert.equal(db.isUsable(), false);
+    assert.equal(reasons.length, 1);
+  });
+
+  test('可用性默认成立；主动 close 不算「不可用」事件', async () => {
+    const db = new DockBrowser('/tmp', '');
+    assert.equal(db.isUsable(), true);
+    let called = 0;
+    db.onUnavailable(() => { called += 1; });
+    await db.close();
+    assert.equal(db.isUsable(), false);
+    assert.equal(called, 0, '主动关闭不应触发重建回调');
+  });
+
+  test('崩溃先于订阅时，订阅方仍能立刻收到通知', () => {
+    const handlers: Record<string, Array<() => void>> = {};
+    const db = new DockBrowser('/tmp', '');
+    (db as any).page = { on: (ev: string, fn: () => void) => { (handlers[ev] ||= []).push(fn); } };
+    db.onUnavailable(() => {});
+    handlers['crash']!.forEach((f) => f());
+    const reasons: string[] = [];
+    db.onUnavailable((reason) => { reasons.push(reason); });
+    assert.equal(reasons.length, 1, '订阅晚于崩溃也必须收到通知');
   });
 });
 
@@ -473,16 +536,16 @@ describe('页内播放器 helper（进度读取）', () => {
     return { w, player: w.__mhPlayer };
   }
 
-  test('正常读取播放进度', () => {
+  test('未经播放计时的媒体位置不能充当有效时长', () => {
     const { player } = makePlayer();
     player.audio = { currentTime: 12.5, duration: 299, ended: false };
-    assert.deepEqual(player.progress(), { playedMs: 12_500, durationMs: 299_000 });
+    assert.deepEqual(player.progress(), { playedMs: 0, positionMs: 12_500, durationMs: 299_000, ended: false });
   });
 
-  test('音频已播完（ended）→ durationMs 取当前进度，保证能被判定为「歌曲播完」结算', () => {
+  test('未建立当前任务计时的旧 ended 不作为当前结束，时长保留真实元数据', () => {
     const { player } = makePlayer();
-    player.audio = { currentTime: 180, duration: 180, ended: true };
-    assert.deepEqual(player.progress(), { playedMs: 180_000, durationMs: 180_000 });
+    player.audio = { currentTime: 179.999, duration: 180, ended: true };
+    assert.deepEqual(player.progress(), { playedMs: 0, positionMs: 179_999, durationMs: 180_000, ended: false });
   });
 
   test('duration 读到 NaN/0 时用上次已知时长兜底（流式音频常见）', () => {
@@ -491,19 +554,22 @@ describe('页内播放器 helper（进度读取）', () => {
     player.progress();
     player.audio.duration = NaN;
     player.audio.currentTime = 61;
-    assert.deepEqual(player.progress(), { playedMs: 61_000, durationMs: 299_000 });
+    assert.deepEqual(player.progress(), { playedMs: 0, positionMs: 61_000, durationMs: 299_000, ended: false });
   });
 
   test('切换歌曲后不沿用上一首的时长（30s → 未知时长且已播放 31s）', async () => {
     const { w, player } = makePlayer();
     w.fetch = async () => ({ json: async () => ({ data: [{ url: 'https://audio.invalid/next' }] }) });
     player.audio = { currentTime: 29, duration: 30, ended: false, play: async () => {} };
-    assert.deepEqual(player.progress(), { playedMs: 29_000, durationMs: 30_000 });
+    assert.deepEqual(player.progress(), { playedMs: 0, positionMs: 29_000, durationMs: 30_000, ended: false });
 
     assert.equal((await player.play('song:2')).ok, true);
     player.audio.currentTime = 31;
     player.audio.duration = NaN;
-    assert.deepEqual(player.progress(), { playedMs: 31_000, durationMs: 0 });
+    const p = player.progress();
+    assert.equal(p.durationMs, 0);
+    assert.equal(p.positionMs, 31_000);
+    assert.equal(p.playedMs, 0, '没有真实经过时间，不能把切歌后的位置当成有效播放');
   });
 
   test('stop 清除缓存时长，未知时长不再回退到停止前的歌曲', () => {
@@ -513,7 +579,7 @@ describe('页内播放器 helper（进度读取）', () => {
     player.stop();
     player.audio.currentTime = 0;
     player.audio.duration = NaN;
-    assert.deepEqual(player.progress(), { playedMs: 0, durationMs: 0 });
+    assert.deepEqual(player.progress(), { playedMs: 0, positionMs: 0, durationMs: 0, ended: false });
   });
 
   test('非有限进度归零，非有限时长不能污染本曲已知时长', () => {
@@ -522,10 +588,10 @@ describe('页内播放器 helper（进度读取）', () => {
     player.progress();
     player.audio.duration = Infinity;
     player.audio.currentTime = NaN;
-    assert.deepEqual(player.progress(), { playedMs: 0, durationMs: 30_000 });
+    assert.deepEqual(player.progress(), { playedMs: 0, positionMs: 0, durationMs: 30_000, ended: false });
     player.audio.currentTime = Infinity;
     player.audio.ended = true;
-    assert.deepEqual(player.progress(), { playedMs: 0, durationMs: 0 });
+    assert.deepEqual(player.progress(), { playedMs: 0, positionMs: 0, durationMs: 30_000, ended: false });
   });
 
   test('play 不返回非有限的接口时长', async () => {
@@ -537,7 +603,7 @@ describe('页内播放器 helper（进度读取）', () => {
 
   test('没有音频时返回全 0', () => {
     const { player } = makePlayer();
-    assert.deepEqual(player.progress(), { playedMs: 0, durationMs: 0 });
+    assert.deepEqual(player.progress(), { playedMs: 0, positionMs: 0, durationMs: 0, ended: false });
   });
 
   test('注入字符串（toString 序列化）可独立求值并挂载 __mhPlayer', () => {
@@ -545,6 +611,185 @@ describe('页内播放器 helper（进度读取）', () => {
     new Function('window', PAGE_HELPER)(fakeWin);
     assert.ok(fakeWin.__mhPlayer, '注入后应挂载 __mhPlayer');
     fakeWin.__mhPlayer.audio = { currentTime: 1, duration: 10, ended: false };
-    assert.deepEqual(fakeWin.__mhPlayer.progress(), { playedMs: 1000, durationMs: 10_000 });
+    assert.deepEqual(fakeWin.__mhPlayer.progress(), { playedMs: 0, positionMs: 1000, durationMs: 10_000, ended: false });
+  });
+});
+
+describe('页内播放器 helper（真实有效播放）', () => {
+  async function fixture() {
+    let now = 0;
+    const w: Record<string, any> = {
+      performance: { now: () => now },
+      fetch: async () => ({ json: async () => ({ data: [{ url: 'https://audio.invalid/test' }] }) }),
+    };
+    createPageHelper(w);
+    const audio = {
+      src: '', currentTime: 0, duration: 300, ended: false, paused: true, playbackRate: 1,
+      async play() { this.currentTime = 0; this.ended = false; this.paused = false; },
+      pause() { this.paused = true; },
+      load() { this.currentTime = 0; this.ended = false; },
+    };
+    w.__mhPlayer.audio = audio;
+    await w.__mhPlayer.play('1');
+    return { w, player: w.__mhPlayer, audio, advance: (ms: number) => { now += ms; } };
+  }
+
+  test('起播前建立基线，首秒与正常 1x 自然结束都按实际时间累计', async () => {
+    const { player, audio, advance } = await fixture();
+    advance(1000); audio.currentTime = 1;
+    assert.equal(player.progress().playedMs, 1000);
+    advance(299_000); audio.currentTime = 300; audio.ended = true; audio.paused = true;
+    assert.deepEqual(player.progress(), {
+      playedMs: 300_000, positionMs: 300_000, durationMs: 300_000, ended: true,
+      evidence: { playbackRate: 1, jumpCount: 0, backwardJumpCount: 0, listenDriftMs: 0, stallDetected: false },
+    });
+  });
+
+  for (const jitterMs of [20, 40]) {
+    test(`正常 1x 300 秒带 ${jitterMs}ms 交替位置抖动，不累积单向计时损耗`, async () => {
+      const { player, audio, advance } = await fixture();
+      for (let second = 1; second <= 300; second++) {
+        advance(1000);
+        audio.currentTime = second - (second % 2 ? jitterMs / 1000 : 0);
+        audio.ended = second === 300;
+        audio.paused = audio.ended;
+        const p = player.progress();
+        assert.equal(p.playedMs, Math.round(audio.currentTime * 1000));
+        assert.equal(p.evidence.jumpCount, 0);
+      }
+      assert.equal(player.progress().playedMs, 300_000);
+    });
+  }
+
+  test('新歌取流期间旧音频已经停止，旧曲 ended 不泄漏给新任务', async () => {
+    const { w, player, audio, advance } = await fixture();
+    advance(300_000); audio.currentTime = 300; audio.ended = true;
+    player.progress();
+    const request = deferred();
+    w.fetch = () => request.promise;
+    const loading = player.play('2');
+    try {
+      const p = player.progress();
+      assert.equal(audio.paused, true);
+      assert.equal(p.playedMs, 0);
+      assert.equal(p.ended, false);
+    } finally {
+      player.stop();
+      request.resolve({ json: async () => ({ data: [{ url: 'late' }] }) });
+      await loading;
+    }
+  });
+
+  test('一秒跳到曲尾不能当作听完，也不能由 ended 补齐有效时长', async () => {
+    const { player, audio, advance } = await fixture();
+    advance(1000); audio.currentTime = 300; audio.ended = true;
+    const p = player.progress();
+    assert.equal(p.playedMs, 0);
+    assert.equal(p.positionMs, 300_000);
+    assert.equal(p.durationMs, 300_000);
+    assert.equal(p.ended, true);
+    assert.equal(p.evidence.jumpCount, 1);
+    assert.equal(p.evidence.listenDriftMs, 300_000);
+  });
+
+  test('小幅位置跃进也不能超过真实经过时间；重复采样不重复累计', async () => {
+    const { player, audio, advance } = await fixture();
+    advance(1000); audio.currentTime = 2;
+    assert.equal(player.progress().playedMs, 1000);
+    assert.equal(player.progress().playedMs, 1000);
+    assert.equal(player.progress().evidence.listenDriftMs, 1000);
+  });
+
+  test('回退不增加有效时长并留下证据，后续真实前进可继续累计', async () => {
+    const { player, audio, advance } = await fixture();
+    advance(10_000); audio.currentTime = 10;
+    assert.equal(player.progress().playedMs, 10_000);
+    advance(1000); audio.currentTime = 2;
+    const backward = player.progress();
+    assert.equal(backward.playedMs, 10_000);
+    assert.equal(backward.evidence.backwardJumpCount, 1);
+    assert.equal(backward.evidence.jumpCount, 1);
+    advance(1000); audio.currentTime = 3;
+    assert.equal(player.progress().playedMs, 11_000);
+  });
+
+  test('倍速区间不计有效时长，恢复 1x 后可累计且仍保留实际最高倍速', async () => {
+    const { player, audio, advance } = await fixture();
+    audio.playbackRate = 2;
+    advance(1000); audio.currentTime = 2;
+    assert.equal(player.progress().playedMs, 0);
+    audio.playbackRate = 1;
+    advance(1000); audio.currentTime = 3;
+    const p = player.progress();
+    assert.equal(p.playedMs, 1000);
+    assert.equal(p.evidence.playbackRate, 2);
+    assert.equal(p.evidence.listenDriftMs, 2000);
+  });
+
+  test('暂停时间不计入有效时长，停滞证据只累计实际播放状态', async () => {
+    const { player, audio, advance } = await fixture();
+    audio.paused = true;
+    advance(60_000);
+    assert.equal(player.progress().playedMs, 0);
+    assert.equal(player.progress().evidence.stallDetected, false);
+    audio.paused = false;
+    advance(40_000);
+    assert.equal(player.progress().evidence.stallDetected, true);
+  });
+
+  for (const paused of [true, false]) {
+    test(`${paused ? '暂停' : '停滞'}切断计时区间，不能用之前的余量抵消恢复后的跳进度`, async () => {
+      const { player, audio, advance } = await fixture();
+      advance(1000); audio.currentTime = 0.5;
+      assert.equal(player.progress().playedMs, 500);
+      audio.paused = paused;
+      advance(1000);
+      assert.equal(player.progress().playedMs, 500);
+      audio.paused = false;
+      advance(1000); audio.currentTime = 2.5;
+      assert.equal(player.progress().playedMs, 1500);
+    });
+  }
+
+  test('起播重取音源后重新建立计时基线，不继承失败等待时间或前单证据', async () => {
+    const { player, audio, advance } = await fixture();
+    advance(1000); audio.currentTime = 50;
+    player.progress();
+    let attempts = 0;
+    audio.play = async () => {
+      audio.currentTime = 0; audio.ended = false; audio.paused = false;
+      if (++attempts === 1) {
+        advance(2000);
+        const e = new Error('temporary'); e.name = 'NetworkError'; throw e;
+      }
+    };
+    assert.equal((await player.play('2')).attempts, 2);
+    advance(1000); audio.currentTime = 1;
+    const p = player.progress();
+    assert.equal(p.playedMs, 1000);
+    assert.equal(p.evidence.jumpCount, 0);
+    assert.equal(p.evidence.listenDriftMs, 0);
+  });
+
+  test('切歌、停止清除本单有效时长与证据，不继承旧音频位置', async () => {
+    const { player, audio, advance } = await fixture();
+    advance(1000); audio.currentTime = 80;
+    assert.equal(player.progress().evidence.jumpCount, 1);
+    await player.play('2');
+    advance(1000); audio.currentTime = 1;
+    const p = player.progress();
+    assert.equal(p.playedMs, 1000);
+    assert.equal(p.evidence.jumpCount, 0);
+    player.stop();
+    assert.equal(player.progress().playedMs, 0);
+    assert.equal(player.progress().positionMs, 0);
+  });
+
+  test('系统时钟回退不虚增有效时间', async () => {
+    const { player, audio, advance } = await fixture();
+    advance(1000); audio.currentTime = 1;
+    assert.equal(player.progress().playedMs, 1000);
+    advance(-1000); audio.currentTime = 2;
+    assert.equal(player.progress().playedMs, 1000);
   });
 });

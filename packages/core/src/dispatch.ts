@@ -1,7 +1,7 @@
 /**
  * 任务状态机：next / finish / abandon 的本地编排（防重入、防并发双发）
  * 状态：idle → fetching → playing → (settle) → idle
- * finish 被拒（job_expired 等）→ 明示并进入下一单（无宽容语义）
+ * finish 被拒 → 明示；是否继续领取由 runtime 按拒绝原因决定。
  */
 import { EventBus } from './events.js';
 import type { ApiResult, FinishInput, FinishPayload, JobPhase, NextPayload } from './types.js';
@@ -22,6 +22,9 @@ export interface CurrentJob {
   musicId: string;
   musicName: string;
   targetMs: number;
+  /** 服务端最低有效播放要求；不替代歌曲完成信号。 */
+  requiredListenMs?: number;
+  requiredListenRatio?: number;
   playedMs: number;
 }
 
@@ -53,11 +56,14 @@ export class JobStateMachine {
     try {
       const r = await this.deps.next();
       if (r.status === 200 && r.payload && r.payload.jobId && r.payload.musicId) {
+        const requiredListenRatio = positiveFinite(r.payload.requiredListenRatio);
         this.current = {
           jobId: r.payload.jobId,
           musicId: String(r.payload.musicId),
           musicName: String(r.payload.musicId),
-          targetMs: r.payload.targetDurationMs ?? 0,
+          targetMs: positiveFinite(r.payload.targetDurationMs) ?? 0,
+          requiredListenMs: positiveFinite(r.payload.requiredListenMs),
+          requiredListenRatio: requiredListenRatio !== undefined && requiredListenRatio <= 1 ? requiredListenRatio : undefined,
           playedMs: 0,
         };
         this.setPhase('playing');
@@ -126,4 +132,8 @@ export class JobStateMachine {
     this.setPhase('idle');
     this.bus.emit('job:current', null);
   }
+}
+
+function positiveFinite(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
 }

@@ -83,6 +83,16 @@ export interface FinishInput {
   stallDetected: boolean;
 }
 
+/** 播放器观察到的真实状态；旧端可以省略，支持的端应传递完整证据。 */
+export interface PlaybackObservation {
+  ended?: boolean;
+  playbackRate?: number;
+  jumpCount?: number;
+  backwardJumpCount?: number;
+  listenDriftMs?: number;
+  stallDetected?: boolean;
+}
+
 /** 结算必须有成功确认；HTTP 200 本身不代表任务入账。 */
 export interface FinishPayload {
   ok?: boolean;
@@ -172,6 +182,7 @@ export interface CoreEventMap {
   'job:settled': { jobId: string; credited: boolean };
   'job:current': { jobId: string; musicId: string; musicName: string; targetMs: number; playedMs: number } | null;
   'job:progress': { jobId: string; playedMs: number; positionMs: number };
+  'runtime:blocked': { code: string; jobId: string } | null;
   'heartbeat:tick': { jobId: string; intervalMs: number; lastAtMs: number };
   'limits:updated': LimitsPayload;
   'log:append': { level: LogLevel; ts: number; msg: string; text?: string; event?: string };
