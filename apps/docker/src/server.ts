@@ -117,7 +117,6 @@ export function createStatusServer({ port, state, staticDir }: { port: number; s
             credits: state.credits || 0,
             authStatus: state.authStatus || '',
             lastApi: state.lastApi ?? null,
-            runtimeBlocked: state.runtimeBlocked ?? null,
             jobsDone: state.jobsDone || 0,
             browserReady: state.browserReady === true,
             job: state.job ?? null,

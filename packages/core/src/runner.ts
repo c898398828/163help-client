@@ -121,15 +121,14 @@ export class ClientRuntime {
         const elapsedMs = Math.max(0, now - this.jobStartedAt);
         const lastHeartbeatAgeMs = this.lastHeartbeatAt === null ? null : Math.max(0, now - this.lastHeartbeatAt);
         const lastAck = lastHeartbeatAgeMs === null ? '从未确认' : `${Math.round(lastHeartbeatAgeMs / 1000)}s 前`;
-        this.log.push('error', 'settle_failed', `${msg}；任务 ${jobId} / 领取至今 ${Math.round(elapsedMs / 1000)}s / 已确认心跳 ${this.heartbeatAcks} 次 / 最后确认 ${lastAck}`,
-          { code, jobId, elapsedMs, heartbeatAcks: this.heartbeatAcks, lastHeartbeatAgeMs });
-        if (code === 'job_not_active' || code === 'job_expired') {
-          // 服务端已将本单判为无效：自动接下一单会反复完整播放仍无法结算。
-          // 在 dispatch 清理任务前停止循环，避免其刚回 idle 就再次领单。
-          this.stop();
-          this.bus.emit('runtime:blocked', { code, jobId });
-          this.log.push('warn', 'runtime_blocked', `任务已被服务端判为无效（${code}），已暂停自动领取，避免重复无效播放；检查服务端任务有效期后可手动启动恢复`, { code, jobId });
-        }
+        // 服务端把本单判为无效（长曲常见于服务端任务期限短于目标时长）：这些单不会入账。
+        // 但不能因此停下——能正常结算的短曲会跟着一起被饿死，直到有人手动重存配置。
+        // 只累计计数，让日志把这个模式暴露出来。
+        const terminal = code === 'job_not_active' || code === 'job_expired';
+        if (terminal) this.settleRejections++;
+        const streak = terminal && this.settleRejections > 1 ? ` / 连续 ${this.settleRejections} 单被服务端判为无效` : '';
+        this.log.push('error', 'settle_failed', `${msg}；任务 ${jobId} / 领取至今 ${Math.round(elapsedMs / 1000)}s / 已确认心跳 ${this.heartbeatAcks} 次 / 最后确认 ${lastAck}${streak}`,
+          { code, jobId, elapsedMs, heartbeatAcks: this.heartbeatAcks, lastHeartbeatAgeMs, ...(terminal ? { consecutiveRejections: this.settleRejections } : {}) });
         this.bus.emit('job:phase', 'settle_failed');
       },
     }, this.bus);
@@ -174,7 +173,6 @@ export class ClientRuntime {
     if (generation !== this.runtimeGeneration) return; // 等待账号同步期间发生暂停/新阻断，旧启动不能覆盖它。
     if (this.auth.status === 'valid') this.authFailed = false;
     if (autostart && this.auth.hasToken() && this.auth.status !== 'logged_out') {
-      this.bus.emit('runtime:blocked', null);
       this.running = true;
       this.startSync();
       void this.cycle();
@@ -230,6 +228,8 @@ export class ClientRuntime {
   private lastHeartbeatAt: number | null = null;
   private heartbeatAcks = 0;
   private playRecoveryAttempts = 0;
+  /** 连续被服务端判为无效的结算次数（成功结算即归零），仅用于日志暴露模式 */
+  private settleRejections = 0;
 
   /** 卡死判定（对齐 4.x 的 playback_stalled）：播放中进度 PLAYBACK_STALL_MS 未前移 → 放弃本单，避免永久挂着 */
   private trackProgress(playedMs: number): void {
@@ -370,6 +370,7 @@ export class ClientRuntime {
         stallDetected: observation?.stallDetected ?? false,
       });
       const secs = `（已播 ${Math.round(playedMs / 1000)}s / 目标 ${Math.round(job.targetMs / 1000)}s）`;
+      if (r === 'settled') this.settleRejections = 0;
       this.log.push(r === 'settled' ? 'info' : 'warn', 'job_finish', `本单结算：${r}${secs}`, { playedMs, targetMs: job.targetMs });
       if (this.running) void this.syncUser();
     } finally {
@@ -381,7 +382,6 @@ export class ClientRuntime {
   acceptSession(p: import('./types.js').LoginPayload): void {
     this.auth.acceptSession(p);
     this.authFailed = false;
-    this.bus.emit('runtime:blocked', null);
     this.running = true;
     this.log.push('info', 'session', '会话已建立');
     this.startSync();

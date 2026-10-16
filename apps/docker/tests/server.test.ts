@@ -161,13 +161,12 @@ describe('docker 管理端 会话与状态', () => {
     } finally { server.closeAllConnections(); server.close(); }
   });
 
-  test('/api/state 透出任务失效后的阻断原因', async () => {
-    const runtimeBlocked = { code: 'job_not_active', jobId: 'expired-job' };
-    const { server, base } = await start({ runtimeBlocked });
+  test('/api/state 不把结算被拒当成阻断状态（客户端继续领单）', async () => {
+    const { server, base } = await start({ runtimeBlocked: { code: 'job_not_active', jobId: 'expired-job' } });
     try {
       const cookie = await login(base);
       const res = await fetch(base + '/api/state', { headers: { Cookie: cookie } });
-      assert.deepEqual((await res.json()).runtimeBlocked, runtimeBlocked);
+      assert.equal((await res.json()).runtimeBlocked, undefined);
     } finally { server.closeAllConnections(); server.close(); }
   });
 });

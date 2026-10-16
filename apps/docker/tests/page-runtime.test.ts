@@ -154,21 +154,6 @@ test('首个轮询失败也显示断连状态，不永远停在连接中', async
   assertStale(page);
 });
 
-test('任务失效暂停有持久可见原因，不能继续显示待命，恢复后清除', async () => {
-  const page = runtime();
-  page.requests[0]!.resolve(response(snapshot({ job: null, runtimeBlocked: { code: 'job_not_active', jobId: 'expired-job' } })));
-  await flush();
-  assert.match(page.elements.get('chips').innerHTML, /已暂停/);
-  assert.match(page.elements.get('nowState').textContent, /已暂停/);
-  assert.match(page.elements.get('nowName').textContent, /任务已失效/);
-  assert.match(page.elements.get('nowTime').textContent, /设置.*保存.*恢复/);
-  assert.doesNotMatch(page.context.document.title, /待命中/);
-  page.context.poll();
-  page.requests[1]!.resolve(response(snapshot({ job: null, runtimeBlocked: null })));
-  await flush();
-  assert.equal(page.elements.get('nowState').textContent, '待命中');
-});
-
 test('未完成的轮询不会被定时器或手动检测重叠发起', async () => {
   const page = await livePage();
   page.context.poll();

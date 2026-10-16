@@ -38,7 +38,6 @@ const state: Record<string, any> = {
   configured: Boolean(String(boot.neteaseCookie || '').trim() && String(boot.clientKey || '').trim()),
   browserReady: false,
   authStatus: '',
-  runtimeBlocked: null as { code: string; jobId: string } | null,
   lastApi: null as { ok: boolean; status: number; at: number } | null,
   lastApiWasOk: true,
   job: null as { musicName: string; playedMs: number; targetMs: number } | null,
@@ -217,7 +216,6 @@ runtime.bus.on('job:current', (j) => {
   state.job = j ? { musicName: j.musicName, playedMs: 0, targetMs: j.targetMs } : null;
 });
 runtime.bus.on('job:settled', (s) => { if (s.credited) state.jobsDone += 1; });
-runtime.bus.on('runtime:blocked', (failure) => { state.runtimeBlocked = failure; });
 runtime.bus.on('job:progress', (p) => { if (state.job) state.job.playedMs = p.playedMs; });
 runtime.bus.on('heartbeat:tick', (t) => {
   if (!currentJobId || t.jobId !== currentJobId) return;
@@ -237,16 +235,12 @@ runtime.bus.on('limits:updated', (s) => {
 runtime.bus.on('log:append', (e) => { pushLog(e.level, e.msg); });
 
 /** 恢复任务前先刷新 VIP，保证首个 /me、/next 已带当前网易云账号等级。 */
-async function startConfiguredRuntime(resumeBlocked = false): Promise<void> {
+async function startConfiguredRuntime(): Promise<void> {
   if (!state.configured) return;
-  if (state.runtimeBlocked && !resumeBlocked) return;
-  const blockedAtStart = state.runtimeBlocked;
   const b = browser;
   if (!b) throw new Error('浏览器未就绪，无法启动任务');
   await refreshIdentity();
   if (browser !== b) throw new Error('浏览器已断开，无法启动任务');
-  // 等待身份期间新发生的任务失效，需要下一次明确恢复；旧启动不能覆盖它。
-  if (state.runtimeBlocked && (!resumeBlocked || state.runtimeBlocked !== blockedAtStart)) return;
   await runtime.start(true);
   if (browser !== b) throw new Error('浏览器已断开，任务启动未完成');
 }
@@ -285,7 +279,6 @@ state.onConfig = (patch: ConfigPatch) => serializeLifecycle(async () => {
   if (cookieChanged) vipTypeCache = 0;
   if (!state.configured) {
     state.acctName = ''; state.credits = 0; state.authStatus = 'logged_out';
-    state.runtimeBlocked = null;
   }
   try {
     if (!cookie) {
@@ -305,7 +298,7 @@ state.onConfig = (patch: ConfigPatch) => serializeLifecycle(async () => {
     } else if (!browser && !(await launchBrowser())) {
       throw new Error('浏览器启动失败，配置尚未应用');
     }
-    await startConfiguredRuntime(true);
+    await startConfiguredRuntime();
   } catch (e) {
     await runtime.suspend('config_apply_failed');
     pushLog('error', '配置应用失败：' + String(e));

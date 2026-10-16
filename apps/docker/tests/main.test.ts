@@ -95,7 +95,6 @@ async function boot(hooks: Hooks = {}) {
     async start(autostart: boolean) {
       assert.equal(autostart, true);
       this.starts += 1;
-      this.bus.emit('runtime:blocked', null);
       events.push(`start:${this.deps.adapter.storage.getToken()}`);
       await hooks.start?.();
       await this.deps.transport.me();
@@ -166,43 +165,12 @@ test('jobsDone 只计入 credited 的 job:settled，不把放弃或清空当作�
   assert.equal(app.state.jobsDone, 1);
 });
 
-test('任务失效阻断保留在状态中，自动浏览器恢复不解除，手动保存后恢复', async () => {
-  const app = await boot();
-  const blocked = { code: 'job_not_active', jobId: 'expired-job' };
-  app.runtime.bus.emit('runtime:blocked', blocked);
-  app.runtime.bus.emit('job:current', null);
-  assert.deepEqual(app.state.runtimeBlocked, blocked);
-  app.browsers[0]!.disconnect();
-  await flush();
-  await app.fire(5000);
-  assert.equal(app.runtime.starts, 1, '自动重建浏览器不得触发新一轮无效播放');
-  assert.deepEqual(app.state.runtimeBlocked, blocked);
-  await app.state.onConfig({ key: initialConfig.clientKey });
-  assert.equal(app.runtime.starts, 2);
-  assert.equal(app.state.runtimeBlocked, null);
-});
-
 test('真实有效时长、媒体位置、结束标志与证据分别传给 core', async () => {
   const evidence = { playbackRate: 2, jumpCount: 1, backwardJumpCount: 0, listenDriftMs: 9000, stallDetected: false };
   const app = await boot({ progress: async () => ({ playedMs: 1000, positionMs: 10000, durationMs: 310000, ended: false, evidence }) });
   app.runtime.bus.emit('job:current', { jobId: 'a', musicName: 'one', targetMs: 310000 });
   await app.fire(1000);
   assert.equal(JSON.stringify(app.runtime.observations), JSON.stringify([[1000, 10000, 310000, { ...evidence, ended: false }]]));
-});
-
-test('配置恢复等候身份期间发生的新任务失效，不得被迟到启动解除', async () => {
-  const hooks: Hooks = {};
-  const app = await boot(hooks);
-  const gate = deferred();
-  hooks.identityWait = () => gate.promise;
-  const pending = app.state.onConfig({ key: initialConfig.clientKey });
-  await flush();
-  const blocked = { code: 'job_not_active', jobId: 'newly-expired-job' };
-  app.runtime.bus.emit('runtime:blocked', blocked);
-  gate.resolve();
-  await pending;
-  assert.equal(app.runtime.starts, 1);
-  assert.deepEqual(app.state.runtimeBlocked, blocked);
 });
 
 test('零有效时长的曲终仍上报，让 core 拒绝试听或跳播而非无限等候', async () => {

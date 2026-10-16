@@ -182,7 +182,6 @@ export interface CoreEventMap {
   'job:settled': { jobId: string; credited: boolean };
   'job:current': { jobId: string; musicId: string; musicName: string; targetMs: number; playedMs: number } | null;
   'job:progress': { jobId: string; playedMs: number; positionMs: number };
-  'runtime:blocked': { code: string; jobId: string } | null;
   'heartbeat:tick': { jobId: string; intervalMs: number; lastAtMs: number };
   'limits:updated': LimitsPayload;
   'log:append': { level: LogLevel; ts: number; msg: string; text?: string; event?: string };

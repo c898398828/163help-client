@@ -10,7 +10,7 @@ async function boot(t: TestContext, options: { next?: Record<string, unknown>; f
   let progress: (...args: any[]) => void = () => {};
   let meReply = async (): Promise<any> => ({ status: 200, payload: {} });
   const calls = { next: 0, play: 0, stop: 0, me: 0, heartbeat: 0, finish: [] as any[], abandon: [] as any[] };
-  const blocked: any[] = [], settled: any[] = [], logs: any[] = [];
+  const settled: any[] = [], logs: any[] = [];
   const runtime = new ClientRuntime({
     adapter: { clientType: 'docker', version: 'test', hasPage: false, probeNetwork: async () => true,
       storage: { getToken: () => 'mh_ck_test', setToken() {}, clearToken() {}, getExpires: () => 0, setExpires() {} } },
@@ -24,17 +24,16 @@ async function boot(t: TestContext, options: { next?: Record<string, unknown>; f
     },
     player: { play: async () => { calls.play++; return true; }, stop: () => { calls.stop++; }, onProgress: cb => { progress = cb; } },
   });
-  runtime.bus.on('runtime:blocked', value => blocked.push(value));
   runtime.bus.on('job:settled', value => settled.push(value));
   runtime.bus.on('log:append', value => logs.push(value));
   t.after(() => runtime.stop());
   await runtime.start(true);
   await flush();
-  return { runtime, calls, blocked, settled, logs, progress: (...args: any[]) => progress(...args), setMe: (reply: typeof meReply) => { meReply = reply; } };
+  return { runtime, calls, settled, logs, progress: (...args: any[]) => progress(...args), setMe: (reply: typeof meReply) => { meReply = reply; } };
 }
 
 for (const code of ['job_not_active', 'job_expired']) {
-  test(`${code} after a long listen stops new claims, heartbeat and statistics timers`, async t => {
+  test(`${code} after a long listen keeps claiming instead of freezing the client`, async t => {
     const h = await boot(t, { next: { targetDurationMs: 310_000 }, finish: async () => ({ status: 409, payload: null, error: code }) });
     for (let second = 1; second <= 310; second++) {
       t.mock.timers.tick(1000);
@@ -42,73 +41,71 @@ for (const code of ['job_not_active', 'job_expired']) {
       await flush();
     }
     assert.equal(h.calls.finish.length, 1);
-    assert.equal(h.settled.length, 0);
-    assert.deepEqual(h.blocked.at(-1), { code, jobId: 'job-1' });
-    const counts = { next: h.calls.next, heartbeat: h.calls.heartbeat, me: h.calls.me };
-    t.mock.timers.tick(120_000);
-    await flush();
-    assert.deepEqual({ next: h.calls.next, heartbeat: h.calls.heartbeat, me: h.calls.me }, counts);
-    assert.equal(h.calls.play, 1, 'an expired task must not lead to another full replay');
+    assert.equal(h.settled.length, 0, 'an expired task must not be reported as credited');
     assert.ok(h.logs.some(value => value.event === 'settle_failed' && value.msg.includes(code)));
+    // 服务端拒绝长曲结算是它自己的期限问题：客户端不能因此停下等人工干预，
+    // 否则短曲（能正常结算）也一起被饿死。
+    t.mock.timers.tick(3000);
+    await flush();
+    assert.equal(h.calls.next, 2, '结算被拒后必须继续领下一单');
+    assert.equal(h.calls.play, 2, '必须继续播放下一单');
   });
 }
 
-test('only explicit restart clears a terminal rejection; stop, suspend and start(false) retain it', async t => {
+test('consecutive terminal rejections are counted in the log so the pattern is visible', async t => {
   const h = await boot(t, { finish: async () => ({ status: 409, payload: null, error: 'job_not_active' }) });
-  h.progress(60_000, 60_000, 60_000);
+  const settleLogs = () => h.logs.filter(value => value.event === 'settle_failed');
+  for (let round = 1; round <= 2; round++) {
+    h.progress(60_000, 60_000, 60_000);
+    await flush();
+    t.mock.timers.tick(3000);
+    await flush();
+  }
+  assert.equal(settleLogs().length, 2);
+  assert.doesNotMatch(settleLogs()[0].msg, /连续/, '首单被拒不算「连续」');
+  assert.match(settleLogs()[1].msg, /连续 2 单/);
+});
+
+test('a confirmed settle resets the consecutive rejection count', async t => {
+  let reject = true;
+  const h = await boot(t, { finish: async () => reject ? { status: 409, payload: null, error: 'job_not_active' } : { status: 200, payload: { ok: true } } });
+  const settleLogs = () => h.logs.filter(value => value.event === 'settle_failed');
+  const playOneJob = async () => { h.progress(60_000, 60_000, 60_000); await flush(); t.mock.timers.tick(3000); await flush(); };
+  await playOneJob();
+  await playOneJob();
+  assert.match(settleLogs()[1].msg, /连续 2 单/);
+  reject = false;
+  await playOneJob();
+  assert.equal(h.settled.length, 1);
+  reject = true;
+  await playOneJob();
+  assert.equal(settleLogs().length, 3);
+  assert.doesNotMatch(settleLogs()[2].msg, /连续/, '成功结算后重新从 1 开始计数');
+});
+
+test('a pending start cannot undo a later stop', async t => {
+  const h = await boot(t);
+  let resolveMe!: (value: any) => void;
+  h.setMe(() => new Promise(resolve => { resolveMe = resolve; }));
+  const pendingStart = h.runtime.start(true);
   await flush();
-  const eventCount = h.blocked.length;
   h.runtime.stop();
-  await h.runtime.suspend('config_changed');
-  await h.runtime.start(false);
-  assert.equal(h.blocked.length, eventCount);
+  await flush();
+  resolveMe({ status: 200, payload: {} });
+  await pendingStart;
+  t.mock.timers.tick(120_000);
+  await flush();
   assert.equal(h.calls.next, 1);
-  await h.runtime.start(true);
-  await flush();
-  assert.equal(h.blocked.at(-1), null);
-  assert.equal(h.calls.next, 2);
-  assert.equal(h.calls.play, 2);
 });
-
-test('accepting a session explicitly resumes after terminal rejection', async t => {
-  const h = await boot(t, { finish: async () => ({ status: 409, payload: { error: 'job_expired' } }) });
-  h.progress(60_000, 60_000, 60_000);
-  await flush();
-  h.runtime.acceptSession({ token: 'mh_ck_new', access_expires_at: '2030-01-01', refresh_expires_at: '2030-01-01' });
-  await flush();
-  assert.equal(h.blocked.at(-1), null);
-  assert.equal(h.calls.next, 2);
-});
-
-for (const stopReason of ['terminal-rejection', 'manual-stop']) {
-  test(`a pending start cannot undo a later ${stopReason}`, async t => {
-    const h = await boot(t, { finish: async () => ({ status: 409, payload: null, error: 'job_not_active' }) });
-    let resolveMe!: (value: any) => void;
-    h.setMe(() => new Promise(resolve => { resolveMe = resolve; }));
-    const pendingStart = h.runtime.start(true);
-    await flush();
-    if (stopReason === 'terminal-rejection') h.progress(60_000, 60_000, 60_000);
-    else h.runtime.stop();
-    await flush();
-    const blockEventCount = h.blocked.length;
-    resolveMe({ status: 200, payload: {} });
-    await pendingStart;
-    t.mock.timers.tick(120_000);
-    await flush();
-    assert.equal(h.calls.next, 1);
-    assert.equal(h.blocked.length, blockEventCount, 'the old start must not clear the later block');
-  });
-}
 
 for (const response of [{ status: 0, payload: null, error: 'network_error' }, { status: 503, payload: null, error: 'unavailable' }]) {
-  test(`transient finish failure ${response.status} does not trigger the terminal-job block`, async t => {
+  test(`transient finish failure ${response.status} keeps claiming`, async t => {
     const h = await boot(t, { finish: async () => response });
     h.progress(60_000, 60_000, 60_000);
     await flush();
     t.mock.timers.tick(3000);
     await flush();
     assert.equal(h.calls.next, 2);
-    assert.equal(h.blocked.some(Boolean), false);
     assert.equal(h.settled.length, 0);
   });
 }

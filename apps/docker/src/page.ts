@@ -407,7 +407,7 @@ function renderLogs(d){
 /* 状态条 / 正在播放 / 心跳 */
 function chip(cls,label,value){return '<span class="chip"><i class="dot '+cls+'"></i>'+esc(label)+(value?'<b>'+esc(value)+'</b>':'')+'</span>'}
 function renderChips(d){
-  var st=!d.configured?['warn','领单','未配置']:(d.runtimeBlocked?['err','领单','已暂停 · 任务失效']:(!d.browserReady?['warn','领单','等待浏览器']:(d.job?['live','领单','正在播放']:['ok','领单','待命中'])));
+  var st=!d.configured?['warn','领单','未配置']:(!d.browserReady?['warn','领单','等待浏览器']:(d.job?['live','领单','正在播放']:['ok','领单','待命中']));
   var br=d.browserReady?['ok','浏览器','就绪']:['err','浏览器','未就绪'];
   var ac=!d.configured?['warn','凭证','未配置']:(d.authStatus==='logged_out'?['err','凭证','已失效 · 请重存']:['ok','凭证',d.acctName||'密钥模式']);
   var api=d.lastApi?(d.lastApi.ok?['ok','服务端',ago(d.lastApi.at)]:['err','服务端','异常 '+(d.lastApi.status||'')+' · '+ago(d.lastApi.at)]):['idle','服务端','尚无请求'];
@@ -415,21 +415,21 @@ function renderChips(d){
   $('chips').innerHTML=chip(st[0],st[1],st[2])+chip(br[0],br[1],br[2])+chip(ac[0],ac[1],ac[2])+chip(api[0],api[1],api[2])+chip(hb[0],hb[1],hb[2]);
 }
 function renderNow(d){
-  var blocked=d.runtimeBlocked, j=blocked?null:d.job;
-  $('nowDot').className='dot '+(blocked?'err':(j?'live':'idle'));
-  $('nowState').textContent=blocked?'已暂停 · 任务失效':(j?'正在播放':'待命中');
-  $('sideState').textContent=blocked?'!':(j?'▶':'·');
+  var j=d.job;
+  $('nowDot').className='dot '+(j?'live':'idle');
+  $('nowState').textContent=j?'正在播放':'待命中';
+  $('sideState').textContent=j?'▶':'·';
   $('logoMark').classList.toggle('live',!!j);
-  document.title=(blocked?'已暂停':(j?'▶ '+j.musicName:'待命中'))+' · 互助控制台';
-  var name=blocked?'服务端任务已失效，已停止自动领单':(j?(j.musicName||'—'):'—');
-  ['nowName','tName'].forEach(function(id){var el=$(id);if(el){el.textContent=id==='tName'&&!j&&!blocked?'空闲中':name;el.classList.toggle('idle',!j)}});
+  document.title=(j?'▶ '+j.musicName:'待命中')+' · 互助控制台';
+  var name=j?(j.musicName||'—'):'—';
+  ['nowName','tName'].forEach(function(id){var el=$(id);if(el){el.textContent=id==='tName'&&!j?'空闲中':name;el.classList.toggle('idle',!j)}});
   var played=j?Math.floor((j.playedMs||0)/1000):0, target=j?Math.max(1,Math.floor((j.targetMs||0)/1000)):1;
-  var txt=blocked?'请检查服务端任务期限；处理后在「设置」重新填写密钥并保存恢复':(j?(fmtClock(played)+' / '+fmtClock(target)):((d.jobsDone||0)+' 单已完成'));
+  var txt=j?(fmtClock(played)+' / '+fmtClock(target)):((d.jobsDone||0)+' 单已完成');
   $('nowTime').textContent=txt;$('tTime').textContent=txt;
   var w=j?Math.min(100,(j.playedMs/Math.max(1,j.targetMs))*100):0;
   $('nowBar').style.width=w+'%';$('tBar').style.width=w+'%';
   $('nowBar').classList.toggle('playing',!!j);$('tBar').classList.toggle('playing',!!j);
-  var td=$('tDot');if(td)td.className='dot '+(blocked?'err':(j?'live':'idle'));
+  var td=$('tDot');if(td)td.className='dot '+(j?'live':'idle');
 }
 function renderHb(d){
   $('hbBars').classList.remove('stale');
