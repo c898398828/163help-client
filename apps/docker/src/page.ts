@@ -654,7 +654,7 @@ function renderServerRows(){
     var kp=s.configured?'已配置密钥 (留空保留) 或 mh_ck_...':'mh_ck_xxxxxxxx';
     return '<div class="srv-item">' +
       '<div class="srv-item-head">' +
-        '<span style="font-weight:600;font-size:12px;color:var(--t1)">#'+(i+1)+' '+esc(s.name||'未命名')+'</span>' +
+        '<span id="srvTitle'+i+'" style="font-weight:600;font-size:12px;color:var(--t1)">#'+(i+1)+' '+esc(s.name||'未命名')+'</span>' +
         '<div style="display:flex;align-items:center;gap:10px">' +
           '<label class="srv-check"><input type="checkbox" '+(s.enabled?'checked':'')+' onchange="updateServerEnabled('+i+',this.checked)"> 启用</label>' +
           (serversData.length>1?'<button type="button" class="tool" style="color:var(--err);border-color:rgba(255,107,107,.3)" onclick="removeServerRow('+i+')">删除</button>':'') +
@@ -664,7 +664,7 @@ function renderServerRows(){
         '<div><label>备注名</label><input value="'+esc(s.name)+'" placeholder="如：主服" oninput="updateServerName('+i+',this.value)"/></div>' +
         '<div><label>API 地址</label><input value="'+esc(s.baseUrl)+'" placeholder="如：https://..." oninput="updateServerUrl('+i+',this.value)"/></div>' +
       '</div>' +
-      '<div><label>Portal 客户端密钥（mh_ck_ 开头）</label><input type="password" value="'+esc(s.clientKey)+'" placeholder="'+kp+'" oninput="updateServerKey('+i+',this.value)"/></div>' +
+      '<div><label>Portal 客户端密钥（mh_ck_ 开头）</label><input type="password" value="'+esc(s.clientKey)+'" placeholder="' + kp + '" oninput="updateServerKey('+i+',this.value)"/></div>' +
     '</div>';
   }).join('');
 }
@@ -686,7 +686,13 @@ function removeServerRow(i){
   serversData.splice(i,1);
   renderServerRows();
 }
-function updateServerName(i,val){if(!serversData[i])return;serverListEdited=true;serversData[i].name=val}
+function updateServerName(i,val){
+  if(!serversData[i])return;
+  serverListEdited=true;
+  serversData[i].name=val;
+  var el=document.getElementById('srvTitle'+i);
+  if(el)el.textContent='#'+(i+1)+' '+(val||'未命名');
+}
 function updateServerUrl(i,val){if(!serversData[i])return;serverListEdited=true;serversData[i].baseUrl=val}
 function updateServerKey(i,val){if(!serversData[i])return;serverListEdited=true;serversData[i].clientKey=val;if(i===0){var k=$('nkey');if(k)k.value=val}}
 function updateServerEnabled(i,val){if(!serversData[i])return;serverListEdited=true;serversData[i].enabled=val}
@@ -694,7 +700,7 @@ function saveCfg(){
   var payload={cookie:$('ncookie').value};
   var k=$('nkey');
   if(k&&k.value)payload.key=k.value;
-  if(serverListEdited||serversData.length>0){
+  if(serverListEdited){
     payload.servers=serversData.map(function(s,i){
       var item={
         id:s.id,

@@ -79,10 +79,19 @@ export function applyConfigPatch(cur: SessionConfig, patch: ConfigPatch, default
       const item = patch.servers[i];
       if (!item || typeof item !== 'object') continue;
       const baseUrl = normalizeServerUrl(String((item as any).baseUrl || ''));
-      const sKey = String((item as any).clientKey || '').trim();
+      let sKey = typeof (item as any).clientKey === 'string' ? (item as any).clientKey.trim() : '';
       const name = String((item as any).name || '').trim() || `服务端 ${i + 1}`;
       const id = String((item as any).id || '').trim() || `srv-${Date.now()}-${i}`;
       const enabled = (item as any).enabled !== false;
+
+      if (!sKey) {
+        const existing = cur.servers?.find((s) => s.id === id);
+        if (existing?.clientKey) {
+          sKey = existing.clientKey;
+        } else if (i === 0 && cur.clientKey) {
+          sKey = cur.clientKey;
+        }
+      }
 
       if (!baseUrl) {
         return { saved: [], error: `第 ${i + 1} 个服务端的 API 地址不能为空` };

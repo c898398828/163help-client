@@ -189,4 +189,29 @@ describe('多服务端与配置迁移改造', () => {
     assert.equal(cur.servers?.[0].name, '服务端 1');
     assert.ok(cur.servers?.[0].id.startsWith('srv-'));
   });
+
+  test('更新服务端名称或留空密钥时继承保留原 clientKey', () => {
+    const cur: SessionConfig = {
+      neteaseCookie: 'MUSIC_U=old',
+      clientKey: 'mh_ck_old',
+      servers: [
+        { id: 's1', name: '主服', baseUrl: 'https://163music.linyu.qzz.io', clientKey: 'mh_ck_old', enabled: true },
+        { id: 's2', name: '副服', baseUrl: 'https://163help.daigua.icu', clientKey: 'mh_ck_s2', enabled: false },
+      ],
+    };
+    // 提交 patch：更新 s1 名称，s1 clientKey 为空串，s2 clientKey 未传
+    const res = applyConfigPatch(cur, {
+      cookie: 'MUSIC_U=new',
+      servers: [
+        { id: 's1', name: '主服新名', baseUrl: 'https://163music.linyu.qzz.io', clientKey: '', enabled: true },
+        { id: 's2', name: '副服', baseUrl: 'https://163help.daigua.icu', enabled: false },
+      ],
+    });
+    assert.equal(res.error, undefined);
+    assert.equal(cur.servers?.length, 2);
+    assert.equal(cur.servers?.[0]?.name, '主服新名');
+    assert.equal(cur.servers?.[0]?.clientKey, 'mh_ck_old');
+    assert.equal(cur.servers?.[1]?.clientKey, 'mh_ck_s2');
+    assert.equal(cur.clientKey, 'mh_ck_old');
+  });
 });

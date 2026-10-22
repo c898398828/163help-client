@@ -122,6 +122,38 @@ describe('docker 管理端 /api/config', () => {
       assert.equal(res.status, 401);
     } finally { server.closeAllConnections(); server.close(); }
   });
+
+  test('POST /api/config 留空服务端密钥时保留原有密钥', async () => {
+    let savedConfig: any = null;
+    const sessionConfig = {
+      clientKey: 'mh_ck_old',
+      servers: [
+        { id: 'srv-1', name: '旧主服', baseUrl: 'https://163music.linyu.qzz.io', clientKey: 'mh_ck_old', enabled: true },
+      ],
+    };
+    const { server, base } = await start({
+      onConfig: async (patch: any) => {
+        const { applyConfigPatch } = await import('../src/settings.ts');
+        const r = applyConfigPatch(sessionConfig, patch);
+        savedConfig = sessionConfig;
+        return r;
+      },
+    });
+    try {
+      const cookie = await login(base);
+      const res = await postConfig(base, cookie, {
+        cookie: 'MUSIC_U=1',
+        servers: [
+          { id: 'srv-1', name: '新主服名称', baseUrl: 'https://163music.linyu.qzz.io', clientKey: '', enabled: true },
+        ],
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.ok, true);
+      assert.equal(savedConfig.servers[0].name, '新主服名称');
+      assert.equal(savedConfig.servers[0].clientKey, 'mh_ck_old');
+    } finally { server.closeAllConnections(); server.close(); }
+  });
 });
 
 describe('docker 管理端 会话与状态', () => {
