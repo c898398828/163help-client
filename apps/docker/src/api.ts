@@ -8,7 +8,7 @@ import { buildSignHeaders, subtleHmac, browserNonce } from '../../../packages/co
 
 export interface ApiDeps {
   base: string;
-  version: string;
+  version: string | (() => string);
   clientType: string;
   getToken: () => string;
   /** 每次请求附带的额外头（如 X-Vip-Type：服务端 /api/me、/api/next 消费） */
@@ -38,7 +38,7 @@ export function createApi(deps: ApiDeps) {
       ...(deps.extraHeaders?.() ?? {}),
       'Content-Type': 'application/json',
       'X-Client-Type': deps.clientType,
-      'X-Music-Helper-Version': deps.version,
+      'X-Music-Helper-Version': typeof deps.version === 'function' ? deps.version() : deps.version,
     };
     if (token) headers['Authorization'] = `Bearer ${token}`;
     const sign = await buildSignHeaders(method, fullUrl, rawBody, token, subtleHmac, browserNonce);

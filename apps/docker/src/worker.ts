@@ -44,6 +44,7 @@ export class ServerWorker {
   private scheduler: MultiServerScheduler;
   private pushLog: (level: string, msg: string) => void;
   private state: ServerRuntimeState;
+  private clientVersion: string;
   private currentReleaseTurn: (() => void) | null = null;
   private unregisterProgress: (() => void) | null = null;
 
@@ -51,6 +52,7 @@ export class ServerWorker {
     this.config = deps.config;
     this.scheduler = deps.scheduler;
     this.pushLog = deps.pushLog;
+    this.clientVersion = deps.clientVersion || '4.3.5';
 
     this.state = {
       id: deps.config.id,
@@ -75,6 +77,13 @@ export class ServerWorker {
       if (!r.ok) {
         if (r.status === 401) {
           this.pushLog('error', `[${this.config.name}] 凭证被拒绝 (401)，已停止本服领单`);
+        } else if (r.status === 403) {
+          if (r.error === 'client_upgrade_required') {
+            this.pushLog('error', `[${this.config.name}] 服务端要求升级客户端（403 client_upgrade_required），尝试自动探测版本`);
+            void this.probeServerVersion();
+          } else {
+            this.pushLog('warn', `[${this.config.name}] 服务端拒绝请求（403 ${r.error || '无权限'}）`);
+          }
         } else if (r.status === 0) {
           this.pushLog('warn', `[${this.config.name}] 网络不可达 (${r.error || '超时'})`);
         }
@@ -83,7 +92,7 @@ export class ServerWorker {
 
     const api = createApi({
       base: deps.config.baseUrl,
-      version: deps.clientVersion,
+      version: () => this.clientVersion,
       clientType: 'docker',
       getToken: () => this.config.clientKey,
       extraHeaders: deps.extraHeaders ?? (() => ({})),
@@ -239,8 +248,21 @@ export class ServerWorker {
     }
   }
 
+  async probeServerVersion(): Promise<void> {
+    try {
+      const res = await fetch(`${this.config.baseUrl}/api/client-version`, { signal: AbortSignal.timeout(3000) });
+      if (res.ok) {
+        const d = (await res.json()) as any;
+        if (d && typeof d.version === 'string' && d.version.trim()) {
+          this.clientVersion = d.version.trim();
+        }
+      }
+    } catch { /* 忽略探测失败 */ }
+  }
+
   async start(): Promise<void> {
     if (!this.config.enabled || !this.config.clientKey.trim()) return;
+    void this.probeServerVersion();
     await this.runtime.start(true);
   }
 

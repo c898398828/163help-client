@@ -19,7 +19,7 @@ import { ServerWorker, type ServerRuntimeState } from './worker.ts';
 const DATA_DIR = process.env.DATA_DIR || '/data';
 const BASE = normalizeServerUrl(process.env.API_BASE || 'https://163music.linyu.qzz.io');
 const VERSION = '5.1';
-const CLIENT_VERSION = process.env.CLIENT_VERSION || '4.0.21';
+const CLIENT_VERSION = process.env.CLIENT_VERSION || '4.3.5';
 
 const SESSION_FILE = path.join(DATA_DIR, 'session.json');
 fs.mkdirSync(DATA_DIR, { recursive: true });
