@@ -398,7 +398,6 @@ function bindWorkerEvents(worker: ServerWorker): void {
     state.helpUsed = s.helpedToday; state.helpLimit = s.helpedLimit;
     state.recv = s.receivedToday; state.recvLimit = s.receivedLimit;
   });
-  worker.runtime.bus.on('log:append', (e: any) => { pushLog(e.level, e.msg); });
 }
 
 function createWorkerInstance(server: ServerConfigItem): ServerWorker {

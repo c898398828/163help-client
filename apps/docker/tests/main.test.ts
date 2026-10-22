@@ -262,7 +262,7 @@ async function boot(hooks: Hooks = {}) {
         this.state.recvLimit = s?.receivedLimit || 26;
       });
       this.runtime.bus.on('log:append', (e: any) => {
-        this.pushLog(e.level, e.msg);
+        this.pushLog(e.level, `[${this.config.name}] ${e.msg}`);
       });
     }
 

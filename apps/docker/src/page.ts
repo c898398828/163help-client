@@ -201,8 +201,10 @@ button{font:inherit}
 .toast.bad{border-color:rgba(255,107,107,.5);color:var(--err)}
 :focus-visible{outline:2px solid var(--red);outline-offset:2px;border-radius:4px}
 /* ---- 多服务端卡片与管理表单 ---- */
-.srv-badge{display:inline-flex;align-items:center;padding:1px 7px;border-radius:4px;font-size:10.5px;font-weight:600;background:var(--redbg);color:var(--red2);border:1px solid rgba(236,65,65,.3)}
-.ltag{display:inline-block;padding:0 5px;border-radius:3px;font-size:10px;font-weight:600;background:var(--redbg);color:var(--red2);border:1px solid rgba(236,65,65,.25);margin-right:5px;vertical-align:baseline}
+.srv-badge{display:inline-flex;align-items:center;padding:1px 7px;border-radius:4px;font-size:10.5px;font-weight:600;background:rgba(124,92,255,.14);color:#A29BFE;border:1px solid rgba(124,92,255,.32)}
+.ltag{display:inline-block;padding:0 5px;border-radius:3px;font-size:10px;font-weight:600;background:rgba(124,92,255,.14);color:#A29BFE;border:1px solid rgba(124,92,255,.30);margin-right:5px;vertical-align:baseline}
+[data-theme=light] .srv-badge{background:rgba(108,92,231,.10);color:#5B4BC4;border-color:rgba(108,92,231,.25)}
+[data-theme=light] .ltag{background:rgba(108,92,231,.10);color:#5B4BC4;border-color:rgba(108,92,231,.25)}
 .srv-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
 .srv-card{padding:13px 14px;border-radius:var(--r);display:flex;flex-direction:column;gap:8px;transition:transform .2s var(--ease),border-color .2s ease}
 .srv-card:hover{transform:translateY(-2px);border-color:rgba(236,65,65,.35)}
