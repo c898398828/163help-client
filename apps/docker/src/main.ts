@@ -12,11 +12,14 @@ import { DockBrowser } from './browser.ts';
 import { createApi } from './api.ts';
 import { createTransport } from './transport.ts';
 import { createStatusServer } from './server.ts';
-import { applyConfigPatch, type ConfigPatch } from './settings.ts';
+import { applyConfigPatch, migrateLegacyConfig, normalizeServerUrl, type ConfigPatch, type ServerConfigItem, type SessionConfig } from './settings.ts';
+import { MultiServerScheduler } from './scheduler.ts';
+import { ServerWorker, type ServerRuntimeState } from './worker.ts';
 
 const DATA_DIR = process.env.DATA_DIR || '/data';
-const BASE = process.env.API_BASE || 'https://163music.linyu.qzz.io';
+const BASE = normalizeServerUrl(process.env.API_BASE || 'https://163music.linyu.qzz.io');
 const VERSION = '5.1';
+const CLIENT_VERSION = process.env.CLIENT_VERSION || '4.0.21';
 
 const SESSION_FILE = path.join(DATA_DIR, 'session.json');
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -27,7 +30,52 @@ const cfg = {
   save(c: object): void { fs.writeFileSync(SESSION_FILE, JSON.stringify(c, null, 2)); }, // 写盘失败会抛出 → 管理端 500
 };
 
+/** 环境变量合并注入与向前兼容迁移 */
+function injectEnvConfig(cur: SessionConfig, defaultBase: string): SessionConfig {
+  if (!cur.clientKey && process.env.CLIENT_KEY?.trim()) {
+    cur.clientKey = process.env.CLIENT_KEY.trim();
+  }
+  migrateLegacyConfig(cur, defaultBase);
+  if (!cur.servers) cur.servers = [];
+  for (let i = 1; ; i++) {
+    const url = process.env[`SERVER_${i}_URL`];
+    const key = process.env[`SERVER_${i}_KEY`];
+    const name = process.env[`SERVER_${i}_NAME`] || `服务端 ${i}`;
+    if (!url && !key) break;
+    if (url && key) {
+      const normUrl = normalizeServerUrl(url);
+      const sKey = key.trim();
+      const existing = cur.servers.find((s) => s.baseUrl === normUrl || s.id === `env-${i}`);
+      if (!existing) {
+        cur.servers.push({
+          id: `env-${i}`,
+          name,
+          baseUrl: normUrl,
+          clientKey: sKey,
+          enabled: true,
+        });
+      }
+    }
+  }
+  if (cur.servers.length > 0 && !cur.clientKey && cur.servers[0].clientKey) {
+    cur.clientKey = cur.servers[0].clientKey;
+  }
+  return cur;
+}
+
 const boot = cfg.load();
+injectEnvConfig(boot, BASE);
+
+function isConfigured(c: SessionConfig): boolean {
+  const cookie = String(c.neteaseCookie || '').trim();
+  const hasKey = Boolean(String(c.clientKey || '').trim());
+  const hasServer = Boolean(c.servers?.some((s) => s.enabled && String(s.clientKey || '').trim()));
+  return Boolean(cookie && (hasServer || hasKey));
+}
+
+const scheduler = new MultiServerScheduler();
+const workers = new Map<string, ServerWorker>();
+
 const state: Record<string, any> = {
   startedAt: Date.now(),
   helpUsed: 0, helpLimit: 9000,
@@ -35,15 +83,18 @@ const state: Record<string, any> = {
   jobsDone: 0,
   acctName: '',
   credits: 0,
-  configured: Boolean(String(boot.neteaseCookie || '').trim() && String(boot.clientKey || '').trim()),
+  configured: isConfigured(boot),
   browserReady: false,
   authStatus: '',
   lastApi: null as { ok: boolean; status: number; at: number } | null,
   lastApiWasOk: true,
-  job: null as { musicName: string; playedMs: number; targetMs: number } | null,
+  job: null as { musicName: string; playedMs: number; targetMs: number; serverId?: string; serverName?: string } | null,
   hbIntervals: [] as number[],
   lastEvent: '',
   logs: [] as Array<{ level: string; ts: number; msg: string }>,
+  get servers(): ServerRuntimeState[] {
+    return Array.from(workers.values()).map((w) => w.getState());
+  },
 };
 
 /** 写入管理端日志环（管理页可见）+ 标准输出（docker logs 可见） */
@@ -65,10 +116,6 @@ const storage = {
   getExpires: () => 0,
   setExpires: () => {},
 };
-
-/** 服务端版本闸门当前只放行 3.x/4.x（5.x 会被 403 client_upgrade_required 拒绝）；
- *  因此按协议等价版本上报，服务端放行 5.x 后可用 CLIENT_VERSION 环境变量改回。 */
-const CLIENT_VERSION = process.env.CLIENT_VERSION || '4.0.21';
 
 /** 记录最近一次服务端请求结果（状态条/诊断用）；状态由好变坏时记一条日志，避免刷屏。
  *  4xx 是服务端最终裁决（401 会停循环、409 表示任务已失效），不能写成「将持续重试」误导排查。 */
@@ -98,15 +145,6 @@ function setLastApi(r: { ok: boolean; status: number; at: number; error?: string
 /** 网易云会员等级（X-Vip-Type；服务端 /api/me、/api/next 消费）——由页内身份接口刷新 */
 let vipTypeCache = 0;
 
-const api = createApi({
-  base: BASE,
-  version: CLIENT_VERSION,
-  clientType: 'docker',
-  getToken: () => storage.getToken(),
-  extraHeaders: () => ({ 'X-Vip-Type': String(vipTypeCache) }),
-  onResult: setLastApi,
-});
-
 let browser: DockBrowser | null = null;
 let browserLaunch: Promise<boolean> | null = null;
 let lifecycle: Promise<unknown> = Promise.resolve();
@@ -128,16 +166,22 @@ async function launchBrowser(): Promise<boolean> {
       await b.launch();
       browser = b;
       state.browserReady = true;
+      scheduler.resume();
       b.onUnavailable((reason) => {
         if (browser !== b) return; // 已被替换或主动关闭
         browser = null;
         state.browserReady = false;
         vipTypeCache = 0;
+        scheduler.pause();
         pushLog('error', `浏览器已不可用（${reason}），暂停任务后自动重连`);
         void serializeLifecycle(async () => {
           // 排队期间配置可能已恢复新实例或清空；旧回调只清理旧浏览器，不暂停新任务。
           const ownsRecovery = !browser && state.configured;
-          if (ownsRecovery) await runtime.suspend('browser_disconnected');
+          if (ownsRecovery) {
+            for (const worker of workers.values()) {
+              await worker.runtime.suspend('browser_disconnected');
+            }
+          }
           try { await b.close(); } catch { /* 已断开 */ }
           if (ownsRecovery && !browser && state.configured) {
             setTimeout(() => { void recoverBrowser(); }, 5000);
@@ -171,13 +215,6 @@ async function refreshIdentity() {
 
 let currentJobId: string | null = null;
 let lastHeartbeatFailure = '';
-const transport = createTransport({ api, getIdentity: refreshIdentity, onHeartbeatRejected: (failure) => {
-  if (!currentJobId || failure.jobId !== currentJobId) return;
-  const signature = `${failure.jobId}:${failure.status}:${failure.error}`;
-  if (signature === lastHeartbeatFailure) return;
-  lastHeartbeatFailure = signature;
-  pushLog('warn', `心跳未获确认：${failure.error}（HTTP ${failure.status} / 任务 ${failure.jobId}）`);
-} });
 
 const player = {
   play: async (musicId: string, durationMs: number) => {
@@ -201,55 +238,155 @@ const player = {
   },
 };
 
-const runtime = new ClientRuntime({ adapter: {
-  clientType: 'docker', version: VERSION, storage,
-  probeNetwork: async () => true, hasPage: false,
-}, transport, player } as never);
+const defaultApi = createApi({
+  base: BASE,
+  version: CLIENT_VERSION,
+  clientType: 'docker',
+  getToken: () => storage.getToken(),
+  extraHeaders: () => ({ 'X-Vip-Type': String(vipTypeCache) }),
+  onResult: setLastApi,
+});
 
-runtime.bus.on('job:current', (j) => {
-  const jobId = j?.jobId ?? null;
-  if (jobId !== currentJobId) {
-    state.hbIntervals = [];
+function handleHeartbeatRejected(failure: { jobId: string; status: number; error: string }): void {
+  if (!currentJobId || failure.jobId !== currentJobId) return;
+  const signature = `${failure.jobId}:${failure.status}:${failure.error}`;
+  if (signature === lastHeartbeatFailure) return;
+  lastHeartbeatFailure = signature;
+  pushLog('warn', `心跳未获确认：${failure.error}（HTTP ${failure.status} / 任务 ${failure.jobId}）`);
+}
+
+const defaultTransport = createTransport({
+  api: defaultApi,
+  getIdentity: refreshIdentity,
+  onHeartbeatRejected: handleHeartbeatRejected,
+});
+
+let transport = defaultTransport;
+let runtime: any = null;
+
+function bindWorkerEvents(worker: ServerWorker): void {
+  worker.runtime.bus.on('job:current', (j: any) => {
+    const jobId = j?.jobId ?? null;
+    if (jobId !== currentJobId) {
+      state.hbIntervals = [];
+      lastHeartbeatFailure = '';
+    }
+    currentJobId = jobId;
+    state.job = j ? {
+      musicName: j.musicName,
+      playedMs: 0,
+      targetMs: j.targetMs,
+      serverId: worker.config.id,
+      serverName: worker.config.name,
+    } : null;
+  });
+  worker.runtime.bus.on('job:settled', (s: any) => { if (s?.credited) state.jobsDone += 1; });
+  worker.runtime.bus.on('job:progress', (p: any) => { if (state.job) state.job.playedMs = p.playedMs; });
+  worker.runtime.bus.on('heartbeat:tick', (t: any) => {
+    if (!currentJobId || t.jobId !== currentJobId) return;
     lastHeartbeatFailure = '';
+    state.hbIntervals.push(t.intervalMs);
+    if (state.hbIntervals.length > 30) state.hbIntervals.shift();
+  });
+  worker.runtime.bus.on('auth:user', (u: any) => {
+    state.acctName = u ? u.displayName : '';
+    state.credits = u ? u.credits : 0;
+  });
+  worker.runtime.bus.on('auth:status', (s: string) => {
+    state.authStatus = s;
+    if (s === 'logged_out') pushLog('warn', '凭证已失效（或密钥有误），请在「设置」重新填写');
+  });
+  worker.runtime.bus.on('limits:updated', (s: any) => {
+    state.helpUsed = s.helpedToday; state.helpLimit = s.helpedLimit;
+    state.recv = s.receivedToday; state.recvLimit = s.receivedLimit;
+  });
+  worker.runtime.bus.on('log:append', (e: any) => { pushLog(e.level, e.msg); });
+}
+
+function createWorkerInstance(server: ServerConfigItem): ServerWorker {
+  const w = new ServerWorker({
+    config: server,
+    scheduler,
+    clientVersion: CLIENT_VERSION,
+    getIdentity: refreshIdentity,
+    player,
+    pushLog,
+    extraHeaders: () => ({ 'X-Vip-Type': String(vipTypeCache) }),
+    onHeartbeatRejected: handleHeartbeatRejected,
+  } as any);
+  bindWorkerEvents(w);
+  return w;
+}
+
+function reconcileWorkers(cur: SessionConfig): void {
+  const currentServers = cur.servers || [];
+  const nextIds = new Set(currentServers.map((s) => s.id));
+
+  // 1. 停止并移除已不在列表中的 Worker
+  for (const [id, worker] of workers.entries()) {
+    if (!nextIds.has(id)) {
+      void worker.stop().catch(() => {});
+      workers.delete(id);
+    }
   }
-  currentJobId = jobId;
-  state.job = j ? { musicName: j.musicName, playedMs: 0, targetMs: j.targetMs } : null;
-});
-runtime.bus.on('job:settled', (s) => { if (s.credited) state.jobsDone += 1; });
-runtime.bus.on('job:progress', (p) => { if (state.job) state.job.playedMs = p.playedMs; });
-runtime.bus.on('heartbeat:tick', (t) => {
-  if (!currentJobId || t.jobId !== currentJobId) return;
-  lastHeartbeatFailure = '';
-  state.hbIntervals.push(t.intervalMs);
-  if (state.hbIntervals.length > 30) state.hbIntervals.shift();
-});
-runtime.bus.on('auth:user', (u) => { state.acctName = u ? u.displayName : ''; state.credits = u ? u.credits : 0; });
-runtime.bus.on('auth:status', (s) => {
-  state.authStatus = s;
-  if (s === 'logged_out') pushLog('warn', '凭证已失效（或密钥有误），请在「设置」重新填写');
-});
-runtime.bus.on('limits:updated', (s) => {
-  state.helpUsed = s.helpedToday; state.helpLimit = s.helpedLimit;
-  state.recv = s.receivedToday; state.recvLimit = s.receivedLimit;
-});
-runtime.bus.on('log:append', (e) => { pushLog(e.level, e.msg); });
+
+  // 2. 更新或新建 Worker
+  for (const server of currentServers) {
+    const existing = workers.get(server.id);
+    if (existing) {
+      existing.config.name = server.name;
+      existing.config.baseUrl = server.baseUrl;
+      existing.config.clientKey = server.clientKey;
+      existing.config.enabled = server.enabled;
+    } else {
+      const w = createWorkerInstance(server);
+      workers.set(server.id, w);
+    }
+  }
+
+  // 3. 维护 primary worker 引用（供原有单元测试及向后兼容）
+  const primary = (currentServers[0] && workers.get(currentServers[0].id)) || workers.values().next().value;
+  if (primary) {
+    runtime = primary.runtime;
+    transport = (primary as any).transport || transport;
+  } else if (!runtime) {
+    runtime = new ClientRuntime({
+      adapter: {
+        clientType: 'docker',
+        version: VERSION,
+        storage,
+        probeNetwork: async () => true,
+        hasPage: false,
+      },
+      transport,
+      player,
+    } as never);
+  }
+}
+
+// 启动初始 Worker 映射
+reconcileWorkers(boot);
 
 /** 恢复任务前先刷新 VIP，保证首个 /me、/next 已带当前网易云账号等级。 */
-async function startConfiguredRuntime(): Promise<void> {
+async function startConfiguredWorkers(): Promise<void> {
   if (!state.configured) return;
   const b = browser;
   if (!b) throw new Error('浏览器未就绪，无法启动任务');
   await refreshIdentity();
   if (browser !== b) throw new Error('浏览器已断开，无法启动任务');
-  await runtime.start(true);
-  if (browser !== b) throw new Error('浏览器已断开，任务启动未完成');
+  for (const worker of workers.values()) {
+    if (worker.config.enabled && worker.config.clientKey.trim()) {
+      await worker.start();
+      if (browser !== b) throw new Error('浏览器已断开，任务启动未完成');
+    }
+  }
 }
+
+const startConfiguredRuntime = startConfiguredWorkers;
 
 async function recoverBrowser(): Promise<void> {
   await serializeLifecycle(async () => {
     if (!state.configured || browser?.isUsable()) return;
-    // 渲染进程崩溃后 browser 字段仍非空但页面已死：不先拆掉，这里会永远提前返回，
-    // 客户端就卡在「每 3s 领一单、立刻失败、再领下一单」的僵尸循环里。
     if (browser) {
       const dead = browser;
       browser = null;
@@ -258,7 +395,7 @@ async function recoverBrowser(): Promise<void> {
       pushLog('warn', '浏览器实例已不可用，重建中');
       try { await dead.close(); } catch { /* 已不可用 */ }
     }
-    if (await launchBrowser()) await startConfiguredRuntime();
+    if (await launchBrowser()) await startConfiguredWorkers();
   }).catch((e) => pushLog('error', '浏览器恢复失败：' + String(e)));
 }
 
@@ -267,43 +404,62 @@ state.onConfig = (patch: ConfigPatch) => serializeLifecycle(async () => {
   const cur = cfg.load();
   const oldCookie = String(cur.neteaseCookie || '');
   const oldKey = String(cur.clientKey || '');
-  const result = applyConfigPatch(cur, patch);
+  const oldServersJson = JSON.stringify(cur.servers || []);
+  const result = applyConfigPatch(cur, patch, BASE);
   if (result.error) return result;
+
   const cookie = String(cur.neteaseCookie || '');
   const cookieChanged = cookie !== oldCookie;
-  if (cookieChanged || String(cur.clientKey || '') !== oldKey || patch.clear === true) {
-    await runtime.suspend('config_changed');
+  const serversChanged = JSON.stringify(cur.servers || []) !== oldServersJson;
+  const keyChanged = String(cur.clientKey || '') !== oldKey;
+
+  if (cookieChanged || keyChanged || serversChanged || patch.clear === true) {
+    for (const worker of workers.values()) {
+      await worker.runtime.suspend('config_changed');
+    }
   }
+
   cfg.save(cur); // 写盘失败会抛出；此时旧任务已安全暂停，后续保存可重试
-  state.configured = Boolean(cookie.trim() && String(cur.clientKey || '').trim());
+  state.configured = isConfigured(cur);
   if (cookieChanged) vipTypeCache = 0;
   if (!state.configured) {
     state.acctName = ''; state.credits = 0; state.authStatus = 'logged_out';
   }
+
   try {
     if (!cookie) {
       const b = browser;
       browser = null;
       state.browserReady = false;
       if (b) await b.close();
-    } else if (browser && cookieChanged) {
-      const b = browser;
-      try { await b.setCookie(cookie); }
-      catch (e) {
-        browser = null;
-        state.browserReady = false;
-        try { await b.close(); } catch { /* 不保留半更新的登录态 */ }
-        throw e;
+      for (const worker of workers.values()) {
+        await worker.stop();
       }
-    } else if (!browser && !(await launchBrowser())) {
-      throw new Error('浏览器启动失败，配置尚未应用');
+      workers.clear();
+    } else {
+      if (browser && cookieChanged) {
+        const b = browser;
+        try { await b.setCookie(cookie); }
+        catch (e) {
+          browser = null;
+          state.browserReady = false;
+          try { await b.close(); } catch { /* 不保留半更新的登录态 */ }
+          throw e;
+        }
+      } else if (!browser && !(await launchBrowser())) {
+        throw new Error('浏览器启动失败，配置尚未应用');
+      }
+      reconcileWorkers(cur);
+      await startConfiguredWorkers();
     }
-    await startConfiguredRuntime();
   } catch (e) {
-    await runtime.suspend('config_apply_failed');
+    for (const worker of workers.values()) {
+      await worker.runtime.suspend('config_apply_failed');
+    }
     pushLog('error', '配置应用失败：' + String(e));
     throw e;
   }
+
   pushLog('info', '配置已保存' + (result.saved.length ? '：' + result.saved.join('/') : '（无变化）'));
   return result;
 });

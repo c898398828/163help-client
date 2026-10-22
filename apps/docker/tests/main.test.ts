@@ -4,8 +4,9 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { stripTypeScriptTypes } from 'node:module';
 import vm from 'node:vm';
-import { applyConfigPatch } from '../src/settings.ts';
+import { applyConfigPatch, migrateLegacyConfig, normalizeServerUrl } from '../src/settings.ts';
 import { createTransport } from '../src/transport.ts';
+import { MultiServerScheduler } from '../src/scheduler.ts';
 
 const source = stripTypeScriptTypes(readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8'))
   .replace(/^import .*;\r?$/gm, '');
@@ -110,6 +111,173 @@ async function boot(hooks: Hooks = {}) {
       events.push(`drained:${token}`);
     }
   }
+  const mockCreateApi = (deps: any) => async (_method: string, url: string, _body?: unknown, token = deps.getToken()) => {
+    requests.push({ path: url, token, vipType: deps.extraHeaders()['X-Vip-Type'] });
+    return hooks.apiResponse ? hooks.apiResponse(url) : { status: 200, payload: {} };
+  };
+
+  class FakeServerWorker {
+    config: any;
+    runtime: FakeRuntime;
+    scheduler: MultiServerScheduler;
+    pushLog: (level: string, msg: string) => void;
+    state: any;
+    transport: any;
+    currentReleaseTurn: (() => void) | null = null;
+
+    constructor(deps: any) {
+      this.config = deps.config;
+      this.scheduler = deps.scheduler;
+      this.pushLog = deps.pushLog;
+      this.state = {
+        id: deps.config.id,
+        name: deps.config.name,
+        baseUrl: deps.config.baseUrl,
+        enabled: deps.config.enabled !== false,
+        configured: Boolean(String(deps.config.clientKey || '').trim()),
+        authStatus: '',
+        acctName: '',
+        credits: 0,
+        helpUsed: 0,
+        helpLimit: 9000,
+        recv: 0,
+        recvLimit: 26,
+        jobsDone: 0,
+        lastApi: null,
+        cooldownUntil: 0,
+      };
+
+      const setLastApi = (r: any) => {
+        this.state.lastApi = { ok: r.ok, status: r.status, at: r.at, error: r.error };
+        if (!r.ok) {
+          if (r.status === 401) {
+            this.pushLog('error', `[${this.config.name}] 凭证被拒绝 (401)，已停止本服领单`);
+          } else if (r.status === 0) {
+            this.pushLog('warn', `[${this.config.name}] 网络不可达 (${r.error || '超时'})`);
+          }
+        }
+      };
+
+      const api = mockCreateApi({
+        base: deps.config.baseUrl,
+        version: deps.clientVersion,
+        clientType: 'docker',
+        getToken: () => String(this.config.clientKey || ''),
+        extraHeaders: deps.extraHeaders ?? (() => ({ 'X-Vip-Type': '0' })),
+        onResult: setLastApi,
+      });
+
+      const transport = createTransport({
+        api,
+        getIdentity: deps.getIdentity,
+        onHeartbeatRejected: deps.onHeartbeatRejected ?? ((failure: any) => {
+          this.pushLog('warn', `心跳未获确认：${failure.error}（HTTP ${failure.status} / 任务 ${failure.jobId}）`);
+        }),
+      });
+
+      const gatedTransport = {
+        ...transport,
+        next: async (token: string) => {
+          if (!this.config.enabled) {
+            return { status: 200, payload: { musicId: null, noTargetReason: 'server_disabled' } };
+          }
+          const releaseTurn = await this.scheduler.acquireTurn(this.config.id);
+          if (!releaseTurn) {
+            return { status: 200, payload: { musicId: null, noTargetReason: 'scheduler_paused' } };
+          }
+          this.releaseCurrentTurn();
+          this.currentReleaseTurn = releaseTurn;
+          try {
+            const res = await transport.next(token);
+            if (!res.payload || !res.payload.jobId || !res.payload.musicId) {
+              if (res.payload?.noTargetReason) {
+                this.scheduler.setCooldown(this.config.id);
+                this.state.cooldownUntil = this.scheduler.getCooldownUntil(this.config.id);
+              }
+              this.releaseCurrentTurn();
+            }
+            return res;
+          } catch (e) {
+            this.releaseCurrentTurn();
+            throw e;
+          }
+        },
+        finish: async (token: string, input: any) => {
+          try { return await transport.finish(token, input); }
+          finally { this.releaseCurrentTurn(); }
+        },
+        abandon: async (token: string, r: string, d: string, jobId?: string) => {
+          try { await transport.abandon(token, r, d, jobId); }
+          finally { this.releaseCurrentTurn(); }
+        },
+      };
+      this.transport = gatedTransport;
+
+      this.runtime = new FakeRuntime({
+        adapter: {
+          clientType: 'docker',
+          version: deps.clientVersion,
+          storage: {
+            getToken: () => String(this.config.clientKey || ''),
+            setToken: () => {},
+            clearToken: () => {},
+            getExpires: () => 0,
+            setExpires: () => {},
+          },
+          probeNetwork: async () => true,
+          hasPage: false,
+        },
+        transport: gatedTransport,
+        player: deps.player,
+      });
+
+      this.scheduler.registerServer(this.config.id, () => ({
+        enabled: this.config.enabled,
+        eligible: Boolean(String(this.config.clientKey || '').trim()) && this.state.authStatus !== 'logged_out',
+      }));
+
+      this.runtime.bus.on('job:settled', (s: any) => { if (s?.credited) this.state.jobsDone++; });
+      this.runtime.bus.on('auth:user', (u: any) => {
+        this.state.acctName = u?.displayName || '';
+        this.state.credits = u?.credits || 0;
+      });
+      this.runtime.bus.on('auth:status', (s: string) => { this.state.authStatus = s; });
+      this.runtime.bus.on('limits:updated', (s: any) => {
+        this.state.helpUsed = s?.helpedToday || 0;
+        this.state.helpLimit = s?.helpedLimit || 9000;
+        this.state.recv = s?.receivedToday || 0;
+        this.state.recvLimit = s?.receivedLimit || 26;
+      });
+      this.runtime.bus.on('log:append', (e: any) => {
+        this.pushLog(e.level, e.msg);
+      });
+    }
+
+    private releaseCurrentTurn(): void {
+      if (this.currentReleaseTurn) {
+        const rel = this.currentReleaseTurn;
+        this.currentReleaseTurn = null;
+        rel();
+      }
+    }
+
+    async start(): Promise<void> {
+      if (!this.config.enabled || !String(this.config.clientKey || '').trim()) return;
+      await this.runtime.start(true);
+    }
+
+    async stop(): Promise<void> {
+      this.releaseCurrentTurn();
+      this.scheduler.unregisterServer(this.config.id);
+      await this.runtime.suspend('worker_stopped');
+    }
+
+    getState() {
+      this.state.cooldownUntil = this.scheduler.getCooldownUntil(this.config.id);
+      return { ...this.state };
+    }
+  }
+
   const context = vm.createContext({
     fs: {
       mkdirSync() {},
@@ -121,12 +289,10 @@ async function boot(hooks: Hooks = {}) {
       },
     },
     path, ClientRuntime: FakeRuntime, DockBrowser: FakeBrowser, applyConfigPatch, createTransport,
-    createApi: (deps: any) => async (_method: string, url: string, _body?: unknown, token = deps.getToken()) => {
-      requests.push({ path: url, token, vipType: deps.extraHeaders()['X-Vip-Type'] });
-      return hooks.apiResponse ? hooks.apiResponse(url) : { status: 200, payload: {} };
-    },
+    MultiServerScheduler, ServerWorker: FakeServerWorker, migrateLegacyConfig, normalizeServerUrl,
+    createApi: mockCreateApi,
     createStatusServer: () => { events.push('server:start'); },
-    process: { env: { DATA_DIR: '/test-data', API_BASE: 'http://localhost' }, exit: (code: number) => events.push(`exit:${code}`) },
+    process: { env: { DATA_DIR: '/test-data', API_BASE: 'http://localhost', ...process.env }, exit: (code: number) => events.push(`exit:${code}`) },
     console: { log() {}, error() {} },
     setTimeout: (cb: () => unknown, ms: number) => timer(cb, ms, false),
     setInterval: (cb: () => unknown, ms: number) => timer(cb, ms, true),
@@ -255,7 +421,7 @@ test('清空配置先等待旧凭证的 suspend 完成，再落盘，且不重�
     assert.deepEqual(app.config(), initialConfig);
   } finally { gate.resolve(); }
   await pending;
-  assert.deepEqual(app.config(), {});
+  assert.deepEqual(app.config(), { servers: [] });
   assert.equal(app.state.configured, false);
   assert.equal(app.runtime.starts, 1);
   await app.fire(60_000);
@@ -285,7 +451,19 @@ test('并发配置保存串行执行，每次都读取前一次保存后的配�
     assert.deepEqual(app.config(), initialConfig);
   } finally { gate.resolve(); }
   await Promise.all([first, second]);
-  assert.deepEqual(app.config(), { clientKey: 'mh_ck_new', neteaseCookie: 'MUSIC_U=new' });
+  assert.deepEqual(app.config(), {
+    clientKey: 'mh_ck_new',
+    neteaseCookie: 'MUSIC_U=new',
+    servers: [
+      {
+        id: 'default',
+        name: '默认服务端',
+        baseUrl: 'http://localhost',
+        clientKey: 'mh_ck_new',
+        enabled: true,
+      },
+    ],
+  });
   assert.deepEqual(app.runtime.suspends.map((s) => s.token), ['mh_ck_old', 'mh_ck_new']);
   assert.equal(app.browsers[0]!.cookieChanges.length, 1);
 });
@@ -548,3 +726,85 @@ test('被拒的 4xx 之后恢复成功不报「服务端连接已恢复」（本
   app.setLastApi({ ok: true, status: 200, at: 4 });
   assert.equal(app.state.logs.some((l: any) => /连接已恢复/.test(l.msg)), true);
 });
+
+test('main 配置热重载支持无缝重构 ServerWorker 列表', async () => {
+  const app = await boot();
+  // 初始应该有默认服务端
+  assert.equal(app.state.servers.length, 1);
+  assert.equal(app.state.servers[0].id, 'default');
+  assert.equal(app.state.servers[0].enabled, true);
+
+  // 热重载配置：更新为多服务端
+  await app.state.onConfig({
+    servers: [
+      { id: 'srv-1', name: '服务1', baseUrl: 'http://localhost/srv1', clientKey: 'mh_ck_srv1', enabled: true },
+      { id: 'srv-2', name: '服务2', baseUrl: 'http://localhost/srv2', clientKey: 'mh_ck_srv2', enabled: false },
+    ],
+  });
+
+  // 验证旧 Worker (default) 已被 suspend
+  assert.ok(app.runtime.suspends.some((s) => s.token === 'mh_ck_old'));
+
+  // 验证 state.servers 正确更新为新 Worker 列表
+  assert.equal(app.state.servers.length, 2);
+  assert.equal(app.state.servers[0].id, 'srv-1');
+  assert.equal(app.state.servers[0].name, '服务1');
+  assert.equal(app.state.servers[0].enabled, true);
+  assert.equal(app.state.servers[1].id, 'srv-2');
+  assert.equal(app.state.servers[1].name, '服务2');
+  assert.equal(app.state.servers[1].enabled, false);
+
+  // 再次热重载：删除 srv-2，增加 srv-3
+  await app.state.onConfig({
+    servers: [
+      { id: 'srv-1', name: '服务1', baseUrl: 'http://localhost/srv1', clientKey: 'mh_ck_srv1', enabled: true },
+      { id: 'srv-3', name: '服务3', baseUrl: 'http://localhost/srv3', clientKey: 'mh_ck_srv3', enabled: true },
+    ],
+  });
+
+  assert.equal(app.state.servers.length, 2);
+  assert.equal(app.state.servers.map((s: any) => s.id).sort().join(','), 'srv-1,srv-3');
+});
+
+test('state.job 携带 serverId 与 serverName 信息', async () => {
+  const app = await boot();
+  app.runtime.bus.emit('job:current', { jobId: 'job-123', musicName: '海阔天空', targetMs: 300000 });
+  assert.equal(app.state.job?.musicName, '海阔天空');
+  assert.equal(app.state.job?.serverId, 'default');
+  assert.equal(app.state.job?.serverName, '默认服务端');
+  app.runtime.bus.emit('job:current', null);
+  assert.equal(app.state.job, null);
+});
+
+test('main 启动时支持 SERVER_1_URL / SERVER_1_KEY 注入多服务端', async () => {
+  const origUrl1 = process.env.SERVER_1_URL;
+  const origKey1 = process.env.SERVER_1_KEY;
+  const origName1 = process.env.SERVER_1_NAME;
+  const origUrl2 = process.env.SERVER_2_URL;
+  const origKey2 = process.env.SERVER_2_KEY;
+  const origName2 = process.env.SERVER_2_NAME;
+
+  try {
+    process.env.SERVER_1_URL = 'http://localhost:8001';
+    process.env.SERVER_1_KEY = 'mh_ck_env1';
+    process.env.SERVER_1_NAME = '环境变量服1';
+    process.env.SERVER_2_URL = 'http://localhost:8002';
+    process.env.SERVER_2_KEY = 'mh_ck_env2';
+    process.env.SERVER_2_NAME = '环境变量服2';
+
+    const app = await boot({ config: { neteaseCookie: 'MUSIC_U=test' } });
+    assert.equal(app.state.servers.length, 2);
+    assert.equal(app.state.servers[0].name, '环境变量服1');
+    assert.equal(app.state.servers[0].baseUrl, 'http://localhost:8001');
+    assert.equal(app.state.servers[1].name, '环境变量服2');
+    assert.equal(app.state.servers[1].baseUrl, 'http://localhost:8002');
+  } finally {
+    if (origUrl1 !== undefined) process.env.SERVER_1_URL = origUrl1; else delete process.env.SERVER_1_URL;
+    if (origKey1 !== undefined) process.env.SERVER_1_KEY = origKey1; else delete process.env.SERVER_1_KEY;
+    if (origName1 !== undefined) process.env.SERVER_1_NAME = origName1; else delete process.env.SERVER_1_NAME;
+    if (origUrl2 !== undefined) process.env.SERVER_2_URL = origUrl2; else delete process.env.SERVER_2_URL;
+    if (origKey2 !== undefined) process.env.SERVER_2_KEY = origKey2; else delete process.env.SERVER_2_KEY;
+    if (origName2 !== undefined) process.env.SERVER_2_NAME = origName2; else delete process.env.SERVER_2_NAME;
+  }
+});
+
