@@ -18,7 +18,7 @@ export interface ServerConfigItem {
 
 export interface SessionConfig {
   neteaseCookie?: string;
-  servers: ServerConfigItem[];
+  servers?: ServerConfigItem[];
   clientKey?: string;
   [k: string]: unknown;
 }
@@ -57,9 +57,6 @@ export function migrateLegacyConfig(cur: SessionConfig, defaultBaseUrl: string =
 }
 
 export function applyConfigPatch(cur: SessionConfig, patch: ConfigPatch, defaultBaseUrl?: string): SaveResult {
-  if (!cur.servers) cur.servers = [];
-  migrateLegacyConfig(cur, defaultBaseUrl);
-
   if (patch && patch.clear === true) {
     delete cur.neteaseCookie;
     delete cur.clientKey;
@@ -67,46 +64,24 @@ export function applyConfigPatch(cur: SessionConfig, patch: ConfigPatch, default
     return { saved: ['clear'] };
   }
 
-  const saved: string[] = [];
   const cookie = typeof patch?.cookie === 'string' ? patch.cookie.trim() : '';
   const key = typeof patch?.key === 'string' ? patch.key.trim() : '';
 
-  if (cookie && cookie !== cur.neteaseCookie) {
-    cur.neteaseCookie = cookie;
-    saved.push('cookie');
+  // 1. 全部输入校验置前，确保原子性（任何校验失败不修改 cur 对象）
+  if (key && !key.startsWith(KEY_PREFIX)) {
+    return { saved: [], error: `客户端密钥需以 ${KEY_PREFIX} 开头（个人中心 → 凭证管理）` };
   }
 
-  // 旧版单 key 写入兼容：如果传了 key，更新或创建 servers[0]
-  if (key) {
-    if (!key.startsWith(KEY_PREFIX)) {
-      return { saved: [], error: `客户端密钥需以 ${KEY_PREFIX} 开头（个人中心 → 凭证管理）` };
-    }
-    if (key !== cur.clientKey) {
-      cur.clientKey = key;
-      saved.push('key');
-    }
-    if (cur.servers.length === 0) {
-      cur.servers.push({
-        id: 'default',
-        name: '默认服务端',
-        baseUrl: normalizeServerUrl(defaultBaseUrl || 'https://163music.linyu.qzz.io'),
-        clientKey: key,
-        enabled: true,
-      });
-    } else if (cur.servers[0].clientKey !== key) {
-      cur.servers[0].clientKey = key;
-    }
-  }
-
-  // 多服务端 servers 数组写入
+  let nextServers: ServerConfigItem[] | null = null;
   if (Array.isArray(patch?.servers)) {
-    const nextServers: ServerConfigItem[] = [];
+    nextServers = [];
     for (let i = 0; i < patch.servers.length; i++) {
       const item = patch.servers[i];
       if (!item || typeof item !== 'object') continue;
       const baseUrl = normalizeServerUrl(String((item as any).baseUrl || ''));
       const sKey = String((item as any).clientKey || '').trim();
-      const name = String((item as any).name || `服务端 ${i + 1}`).trim();
+      const name = String((item as any).name || '').trim() || `服务端 ${i + 1}`;
+      const id = String((item as any).id || '').trim() || `srv-${Date.now()}-${i}`;
       const enabled = (item as any).enabled !== false;
 
       if (!baseUrl) {
@@ -126,15 +101,53 @@ export function applyConfigPatch(cur: SessionConfig, patch: ConfigPatch, default
       }
 
       nextServers.push({
-        id: String((item as any).id || `srv-${Date.now()}-${i}`).trim(),
+        id,
         name,
         baseUrl,
         clientKey: sKey,
         enabled,
       });
     }
+  }
 
+  // 2. 校验通过后，初始化并迁移旧配置
+  if (!cur.servers) cur.servers = [];
+  migrateLegacyConfig(cur, defaultBaseUrl);
+
+  const saved: string[] = [];
+
+  if (cookie && cookie !== cur.neteaseCookie) {
+    cur.neteaseCookie = cookie;
+    saved.push('cookie');
+  }
+
+  // 旧版单 key 写入兼容：如果传了 key，更新或创建 servers[0]
+  if (key) {
+    if (key !== cur.clientKey) {
+      cur.clientKey = key;
+      saved.push('key');
+    }
+    if (cur.servers.length === 0) {
+      cur.servers.push({
+        id: 'default',
+        name: '默认服务端',
+        baseUrl: normalizeServerUrl(defaultBaseUrl || 'https://163music.linyu.qzz.io'),
+        clientKey: key,
+        enabled: true,
+      });
+    } else if (cur.servers[0].clientKey !== key) {
+      cur.servers[0].clientKey = key;
+    }
+  }
+
+  // 多服务端 servers 数组写入，并双向同步维护 cur.clientKey
+  if (nextServers !== null) {
     cur.servers = nextServers;
+    if (nextServers.length > 0 && nextServers[0].clientKey) {
+      cur.clientKey = nextServers[0].clientKey;
+    } else {
+      delete cur.clientKey;
+    }
     if (!saved.includes('servers')) saved.push('servers');
   }
 

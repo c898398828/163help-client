@@ -122,4 +122,71 @@ describe('多服务端与配置迁移改造', () => {
     assert.equal(cur.clientKey, undefined);
     assert.deepEqual(cur.servers, []);
   });
+
+  test('配置校验失败时 cur 对象未被篡改（原子性保证）', () => {
+    const cur: SessionConfig = {
+      neteaseCookie: 'MUSIC_U=old',
+      clientKey: 'mh_ck_old',
+      servers: [{ id: 's1', name: '主服', baseUrl: 'https://163music.linyu.qzz.io', clientKey: 'mh_ck_old', enabled: true }]
+    };
+    // 带有效 cookie，但服务端 key 校验失败
+    const res1 = applyConfigPatch(cur, {
+      cookie: 'MUSIC_U=new',
+      servers: [{ baseUrl: 'https://163music.linyu.qzz.io', clientKey: 'invalid_key' }]
+    });
+    assert.ok(res1.error);
+    assert.equal(cur.neteaseCookie, 'MUSIC_U=old'); // 未被提前篡改为 new
+
+    // 带有效 cookie，但 key 前缀失败
+    const res2 = applyConfigPatch(cur, {
+      cookie: 'MUSIC_U=new2',
+      key: 'invalid_key'
+    });
+    assert.ok(res2.error);
+    assert.equal(cur.neteaseCookie, 'MUSIC_U=old'); // 未被提前篡改
+  });
+
+  test('servers 清空后同步清理 clientKey 防止删服复活', () => {
+    const cur: SessionConfig = {
+      neteaseCookie: 'MUSIC_U=old',
+      clientKey: 'mh_ck_old',
+      servers: [{ id: 's1', name: '主服', baseUrl: 'https://163music.linyu.qzz.io', clientKey: 'mh_ck_old', enabled: true }]
+    };
+    // 用户清空 servers
+    const res = applyConfigPatch(cur, { servers: [] });
+    assert.equal(res.saved.includes('servers'), true);
+    assert.deepEqual(cur.servers, []);
+    assert.equal(cur.clientKey, undefined); // 同步清理，不再残留
+
+    // 后续仅更新 cookie
+    const res2 = applyConfigPatch(cur, { cookie: 'MUSIC_U=new' });
+    assert.equal(res2.saved.includes('cookie'), true);
+    assert.deepEqual(cur.servers, []); // 不会因旧 key 复活
+  });
+
+  test('patch.servers 写入时同步更新 clientKey 为首个服务端 key', () => {
+    const cur: SessionConfig = {
+      neteaseCookie: 'MUSIC_U=old',
+      clientKey: 'mh_ck_old',
+      servers: []
+    };
+    applyConfigPatch(cur, {
+      servers: [
+        { id: 's1', name: '主服', baseUrl: 'https://163music.linyu.qzz.io', clientKey: 'mh_ck_new1', enabled: true },
+        { id: 's2', name: '副服', baseUrl: 'https://163help.daigua.icu', clientKey: 'mh_ck_new2', enabled: true }
+      ]
+    });
+    assert.equal(cur.clientKey, 'mh_ck_new1');
+  });
+
+  test('空白字符串 name 与 id 默认值回退', () => {
+    const cur: SessionConfig = {};
+    applyConfigPatch(cur, {
+      servers: [
+        { id: '   ', name: '   ', baseUrl: 'https://163music.linyu.qzz.io', clientKey: 'mh_ck_s1', enabled: true }
+      ]
+    });
+    assert.equal(cur.servers?.[0].name, '服务端 1');
+    assert.ok(cur.servers?.[0].id.startsWith('srv-'));
+  });
 });
