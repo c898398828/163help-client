@@ -285,8 +285,8 @@ ${isAuthed ? `
       </div>
 
       <div class="cards">
-        <div class="card glass"><div class="lbl">今日帮听</div><div class="v" id="help">—<span class="u"> / 9000s</span></div><div class="bar"><i id="helpBar"></i></div></div>
-        <div class="card glass"><div class="lbl">今日被助</div><div class="v" id="recv">—<span class="u"> / 26次</span></div><div class="bar"><i id="recvBar"></i></div></div>
+        <div class="card glass"><div class="lbl">今日帮听 · 全渠道合计</div><div class="v" id="help">—<span class="u"> / 9000s</span></div><div class="bar"><i id="helpBar"></i></div></div>
+        <div class="card glass"><div class="lbl">今日被助 · 全渠道合计</div><div class="v" id="recv">—<span class="u"> / 26次</span></div><div class="bar"><i id="recvBar"></i></div></div>
         <div class="card glass"><div class="lbl">连续运行</div><div class="v" id="up">—</div><div class="sub"><span id="jobsDone">0</span> 单已完成</div></div>
         <div class="card glass"><div class="lbl">网易云账号</div><div class="v" style="font-size:15px" id="acct">—</div><div class="sub" id="acctInfo">—</div></div>
       </div>
@@ -518,12 +518,13 @@ function showNumber(id,value,render){
 }
 function renderStats(d){
   var hl=d.helpLimit??9000, rl=d.recvLimit??26;
-  // 整块一次写入（含限额），不要事后再取内层 id：innerHTML 替换会销毁旧节点
   showNumber('help',d.helpUsed||0,function(n){$('help').innerHTML=n+'<span class="u"> / '+hl+'s</span>'});
   $('helpBar').style.width=(hl>0?Math.min(100,(d.helpUsed||0)/hl*100):0)+'%';
   showNumber('recv',d.recv||0,function(n){$('recv').innerHTML=n+'<span class="u"> / '+rl+'次</span>'});
   $('recvBar').style.width=(rl>0?Math.min(100,(d.recv||0)/rl*100):0)+'%';
-  $('up').textContent=fmtUp(d.uptime||0);$('footup').textContent=fmtUp(d.uptime||0);
+  var upText=fmtUp(d.uptime||0);
+  if(d.beijingDate)upText+=' · '+d.beijingDate;
+  $('up').textContent=upText;$('footup').textContent=fmtUp(d.uptime||0);
   showNumber('jobsDone',d.jobsDone||0,function(n){$('jobsDone').textContent=String(n)});
   var nu=d.neteaseUser;
   if(nu&&(nu.name||nu.id)){

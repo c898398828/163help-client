@@ -124,6 +124,7 @@ export function createStatusServer({ port, state, staticDir }: { port: number; s
             hbIntervals: state.hbIntervals || [],
             helpUsed: state.helpUsed || 0, helpLimit: state.helpLimit ?? 9000,
             recv: state.recv || 0, recvLimit: state.recvLimit ?? 26,
+            beijingDate: state.beijingDate || '',
             logs: (state.logs || []).slice(-50),
             servers: state.servers || [],
           })); return;

@@ -81,11 +81,62 @@ function isConfigured(c: SessionConfig): boolean {
 const scheduler = new MultiServerScheduler();
 const workers = new Map<string, ServerWorker>();
 
+function getBeijingDateStr(ts = Date.now()): string {
+  const d = new Date(ts + 8 * 3600 * 1000);
+  return d.toISOString().slice(0, 10);
+}
+
+let lastBeijingDate = getBeijingDateStr();
+
 const state: Record<string, any> = {
   startedAt: Date.now(),
-  helpUsed: 0, helpLimit: 9000,
-  recv: 0, recvLimit: 26,
-  jobsDone: 0,
+  _helpUsed: 0,
+  _helpLimit: 9000,
+  _recv: 0,
+  _recvLimit: 26,
+  _jobsDone: 0,
+
+  get helpUsed(): number {
+    const list = Array.from(workers.values()).map((w) => w.getState()).filter((s) => s.enabled);
+    if (!list.length) return this._helpUsed || 0;
+    return list.reduce((sum, s) => sum + (s.helpUsed || 0), 0);
+  },
+  set helpUsed(v: number) { this._helpUsed = v; },
+
+  get helpLimit(): number {
+    const list = Array.from(workers.values()).map((w) => w.getState()).filter((s) => s.enabled);
+    if (!list.length) return this._helpLimit ?? 9000;
+    const sum = list.reduce((acc, s) => acc + (s.helpLimit != null && s.helpLimit > 0 ? s.helpLimit : 0), 0);
+    return sum > 0 ? sum : (this._helpLimit ?? 9000);
+  },
+  set helpLimit(v: number) { this._helpLimit = v; },
+
+  get recv(): number {
+    const list = Array.from(workers.values()).map((w) => w.getState()).filter((s) => s.enabled);
+    if (!list.length) return this._recv || 0;
+    return list.reduce((sum, s) => sum + (s.recv || 0), 0);
+  },
+  set recv(v: number) { this._recv = v; },
+
+  get recvLimit(): number {
+    const list = Array.from(workers.values()).map((w) => w.getState()).filter((s) => s.enabled);
+    if (!list.length) return this._recvLimit ?? 26;
+    const sum = list.reduce((acc, s) => acc + (s.recvLimit != null && s.recvLimit > 0 ? s.recvLimit : 0), 0);
+    return sum > 0 ? sum : (this._recvLimit ?? 26);
+  },
+  set recvLimit(v: number) { this._recvLimit = v; },
+
+  get jobsDone(): number {
+    const list = Array.from(workers.values()).map((w) => w.getState()).filter((s) => s.enabled);
+    if (!list.length) return this._jobsDone || 0;
+    return list.reduce((sum, s) => sum + (s.jobsDone || 0), 0);
+  },
+  set jobsDone(v: number) { this._jobsDone = v; },
+
+  get beijingDate(): string {
+    return getBeijingDateStr();
+  },
+
   acctName: '',
   credits: 0,
   neteaseUser: null as { id: string; name: string; vipType: number } | null,
@@ -102,6 +153,20 @@ const state: Record<string, any> = {
     return Array.from(workers.values()).map((w) => w.getState());
   },
 };
+
+// 每 30 秒巡检一次北京时间自然天跨天（00:00:00），跨天时自动重新向服务端拉取零点重置后的当日额度
+setInterval(async () => {
+  const today = getBeijingDateStr();
+  if (today !== lastBeijingDate) {
+    lastBeijingDate = today;
+    pushLog('info', `[系统] 跨入北京时间新的一天（${today}），自动重新同步各渠道额度与统计`);
+    for (const worker of workers.values()) {
+      try {
+        await worker.syncUser();
+      } catch { /* 忽略瞬态网络异常 */ }
+    }
+  }
+}, 30_000);
 
 /** 写入管理端日志环（管理页可见）+ 标准输出（docker logs 可见） */
 function pushLog(level: string, msg: string): void {
