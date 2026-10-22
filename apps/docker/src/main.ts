@@ -221,6 +221,31 @@ async function refreshIdentity() {
 let currentJobId: string | null = null;
 let lastHeartbeatFailure = '';
 
+type ProgressCallback = (
+  playedMs: number,
+  positionMs: number,
+  durationMs: number,
+  observation?: import('../../../packages/core/src/types.ts').PlaybackObservation
+) => void;
+
+const progressListeners = new Set<ProgressCallback>();
+
+setInterval(async () => {
+  const b = browser;
+  const jobId = currentJobId;
+  if (!b || !jobId || progressListeners.size === 0) return;
+  try {
+    const p = await b.progress();
+    if (browser === b && currentJobId === jobId && (p.playedMs > 0 || p.ended)) {
+      for (const cb of progressListeners) {
+        try {
+          cb(p.playedMs, p.positionMs ?? p.playedMs, p.durationMs, { ...p.evidence, ended: p.ended });
+        } catch { /* 忽略单个监听器内部异常 */ }
+      }
+    }
+  } catch { /* 页面繁忙或任务已切换 */ }
+}, 1000);
+
 const player = {
   play: async (musicId: string, durationMs: number) => {
     if (!browser) return { ok: false, err: '浏览器未就绪' };
@@ -228,18 +253,11 @@ const player = {
     catch (e) { return { ok: false, err: e instanceof Error ? e.message : String(e) }; }
   },
   stop: async () => { try { await browser?.stop(); } catch { /* 页面可能已关闭 */ } },
-  onProgress: (cb: (playedMs: number, positionMs: number, durationMs: number, observation?: import('../../../packages/core/src/types.ts').PlaybackObservation) => void) => {
-    setInterval(async () => {
-      const b = browser;
-      const jobId = currentJobId;
-      if (!b || !jobId) return;
-      try {
-        const p = await b.progress();
-        if (browser === b && currentJobId === jobId && (p.playedMs > 0 || p.ended)) {
-          cb(p.playedMs, p.positionMs ?? p.playedMs, p.durationMs, { ...p.evidence, ended: p.ended });
-        }
-      } catch { /* 页面繁忙或任务已切换 */ }
-    }, 1000);
+  onProgress: (cb: ProgressCallback) => {
+    progressListeners.add(cb);
+    return () => {
+      progressListeners.delete(cb);
+    };
   },
 };
 
@@ -257,7 +275,8 @@ function handleHeartbeatRejected(failure: { jobId: string; status: number; error
   const signature = `${failure.jobId}:${failure.status}:${failure.error}`;
   if (signature === lastHeartbeatFailure) return;
   lastHeartbeatFailure = signature;
-  pushLog('warn', `心跳未获确认：${failure.error}（HTTP ${failure.status} / 任务 ${failure.jobId}）`);
+  const tag = `[${state.job?.serverName || '心跳'}]`;
+  pushLog('warn', `${tag} 心跳未获确认：${failure.error}（HTTP ${failure.status} / 任务 ${failure.jobId}）`);
 }
 
 const defaultTransport = createTransport({
@@ -389,12 +408,14 @@ async function startConfiguredWorkers(): Promise<void> {
   if (!b) throw new Error('浏览器未就绪，无法启动任务');
   await refreshIdentity();
   if (browser !== b) throw new Error('浏览器已断开，无法启动任务');
+  const startPromises: Promise<void>[] = [];
   for (const worker of workers.values()) {
     if (worker.config.enabled && worker.config.clientKey.trim()) {
-      await worker.start();
-      if (browser !== b) throw new Error('浏览器已断开，任务启动未完成');
+      startPromises.push(worker.start());
     }
   }
+  await Promise.all(startPromises);
+  if (browser !== b) throw new Error('浏览器已断开，任务启动未完成');
 }
 
 const startConfiguredRuntime = startConfiguredWorkers;

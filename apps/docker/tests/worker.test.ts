@@ -1,7 +1,65 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { ServerWorker, type WorkerDeps } from '../src/worker.ts';
+import { readFileSync } from 'node:fs';
+import { stripTypeScriptTypes } from 'node:module';
+import vm from 'node:vm';
+import { ClientRuntime } from '../../../packages/core/dist/index.js';
 import { MultiServerScheduler } from '../src/scheduler.ts';
+import { createApi } from '../src/api.ts';
+import { createTransport } from '../src/transport.ts';
+import type { ServerConfigItem } from '../src/settings.ts';
+
+const workerRaw = readFileSync(new URL('../src/worker.ts', import.meta.url), 'utf8');
+const workerSource = stripTypeScriptTypes(workerRaw)
+  .replace(/^import .*;\r?$/gm, '')
+  .replace(/\bexport\s+/g, '');
+
+const context = vm.createContext({
+  ClientRuntime,
+  createApi,
+  createTransport,
+  MultiServerScheduler,
+  console,
+  setTimeout,
+  clearTimeout,
+  setInterval,
+  clearInterval,
+});
+vm.runInContext(workerSource + '\n;globalThis.ServerWorker = ServerWorker;', context);
+const ServerWorker = (context as any).ServerWorker;
+
+export interface ServerRuntimeState {
+  id: string;
+  name: string;
+  baseUrl: string;
+  enabled: boolean;
+  configured: boolean;
+  authStatus: string;
+  acctName: string;
+  credits: number;
+  helpUsed: number;
+  helpLimit: number;
+  recv: number;
+  recvLimit: number;
+  jobsDone: number;
+  lastApi: { ok: boolean; status: number; at: number; error?: string } | null;
+  cooldownUntil: number;
+}
+
+export interface WorkerDeps {
+  config: ServerConfigItem;
+  scheduler: MultiServerScheduler;
+  clientVersion: string;
+  getIdentity: () => Promise<{ id: string; name: string; vipType: number }>;
+  player: {
+    play: (musicId: string, durationMs: number, ownerName: string) => Promise<any>;
+    stop: () => Promise<void> | void;
+    onProgress: (cb: (playedMs: number, positionMs: number, durationMs: number) => void) => void;
+  };
+  pushLog: (level: string, msg: string) => void;
+  extraHeaders?: () => Record<string, string>;
+  onHeartbeatRejected?: (failure: { jobId: string; status: number; error: string }) => void;
+}
 
 function createMockDeps(overrides: Partial<WorkerDeps> = {}): {
   deps: WorkerDeps;
@@ -592,5 +650,44 @@ describe('ServerWorker 封装与 Core Runtime 协同', () => {
       globalThis.fetch = origFetch;
       await worker.stop();
     }
+  });
+
+  test('ServerWorker.getState 动态同步可变配置（名称、启闭状态、密钥）', async () => {
+    const { deps } = createMockDeps();
+    const worker = new ServerWorker(deps);
+
+    assert.equal(worker.getState().name, '测试主服');
+    assert.equal(worker.getState().enabled, true);
+    assert.equal(worker.getState().configured, true);
+
+    // 修改可变字段（模拟 reconcileWorkers 热修改 existing.config）
+    deps.config.name = '新服名';
+    deps.config.enabled = false;
+    deps.config.clientKey = '   ';
+
+    const updated = worker.getState();
+    assert.equal(updated.name, '新服名');
+    assert.equal(updated.enabled, false);
+    assert.equal(updated.configured, false);
+
+    await worker.stop();
+  });
+
+  test('ServerWorker.stop 时自动注销 player.onProgress 监听器', async () => {
+    let unregisterCalled = false;
+    const { deps } = createMockDeps({
+      player: {
+        play: async () => true,
+        stop: async () => {},
+        onProgress: () => () => {
+          unregisterCalled = true;
+        },
+      },
+    });
+    const worker = new ServerWorker(deps);
+    assert.equal(unregisterCalled, false);
+
+    await worker.stop();
+    assert.equal(unregisterCalled, true);
   });
 });

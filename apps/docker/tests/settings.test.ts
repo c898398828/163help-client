@@ -214,4 +214,35 @@ describe('多服务端与配置迁移改造', () => {
     assert.equal(cur.servers?.[1]?.clientKey, 'mh_ck_s2');
     assert.equal(cur.clientKey, 'mh_ck_old');
   });
+
+  test('applyConfigPatch 对重复服务端 ID 进行去重与防护', () => {
+    const cur: SessionConfig = {
+      neteaseCookie: 'MUSIC_U=old',
+      clientKey: 'mh_ck_old',
+      servers: [],
+    };
+
+    // 1. 同 ID 且同 baseUrl：去重，只保留 1 个
+    const resDedup = applyConfigPatch(cur, {
+      servers: [
+        { id: 's1', name: '服1', baseUrl: 'https://163music.linyu.qzz.io', clientKey: 'mh_ck_1', enabled: true },
+        { id: 's1', name: '服1重复', baseUrl: 'https://163music.linyu.qzz.io/', clientKey: 'mh_ck_1', enabled: true },
+      ],
+    });
+    assert.equal(resDedup.error, undefined);
+    assert.equal(cur.servers?.length, 1);
+    assert.equal(cur.servers?.[0]?.id, 's1');
+
+    // 2. 同 ID 但不同 baseUrl：防护 ID 冲突，自动生成唯一 ID
+    const resProtect = applyConfigPatch(cur, {
+      servers: [
+        { id: 'dup', name: '服A', baseUrl: 'https://server-a.com', clientKey: 'mh_ck_a', enabled: true },
+        { id: 'dup', name: '服B', baseUrl: 'https://server-b.com', clientKey: 'mh_ck_b', enabled: true },
+      ],
+    });
+    assert.equal(resProtect.error, undefined);
+    assert.equal(cur.servers?.length, 2);
+    assert.equal(cur.servers?.[0]?.id, 'dup');
+    assert.equal(cur.servers?.[1]?.id, 'dup-1');
+  });
 });

@@ -75,14 +75,35 @@ export function applyConfigPatch(cur: SessionConfig, patch: ConfigPatch, default
   let nextServers: ServerConfigItem[] | null = null;
   if (Array.isArray(patch?.servers)) {
     nextServers = [];
+    const seenIds = new Set<string>();
     for (let i = 0; i < patch.servers.length; i++) {
       const item = patch.servers[i];
       if (!item || typeof item !== 'object') continue;
       const baseUrl = normalizeServerUrl(String((item as any).baseUrl || ''));
       let sKey = typeof (item as any).clientKey === 'string' ? (item as any).clientKey.trim() : '';
       const name = String((item as any).name || '').trim() || `服务端 ${i + 1}`;
-      const id = String((item as any).id || '').trim() || `srv-${Date.now()}-${i}`;
+      let id = String((item as any).id || '').trim();
+      if (!id) {
+        id = `srv-${Date.now()}-${i}`;
+      }
       const enabled = (item as any).enabled !== false;
+
+      // 重复服务端 ID 去重与防护
+      if (seenIds.has(id)) {
+        if (nextServers.some((s) => s.id === id && s.baseUrl === baseUrl)) {
+          // 同一 ID 且相同 API 地址：判定为重复配置，去重跳过
+          continue;
+        }
+        // 同一 ID 但不同 API 地址：防护 ID 冲突，分配安全后缀
+        let suffix = 1;
+        let safeId = `${id}-${suffix}`;
+        while (seenIds.has(safeId)) {
+          suffix++;
+          safeId = `${id}-${suffix}`;
+        }
+        id = safeId;
+      }
+      seenIds.add(id);
 
       if (!sKey) {
         const existing = cur.servers?.find((s) => s.id === id);

@@ -446,4 +446,33 @@ describe('MultiServerScheduler 调度仲裁器', () => {
     assert.equal(t2?.serverId, 's2');
     t2.release('settled');
   });
+
+  test('acquireTurn 循环内因 paused 退出时级联唤醒后续等待者（防漏唤醒）', async () => {
+    const scheduler = new MultiServerScheduler();
+    scheduler.registerServer('s1', () => ({ enabled: true, eligible: true }));
+    scheduler.registerServer('s2', () => ({ enabled: true, eligible: true }));
+    scheduler.registerServer('s3', () => ({ enabled: true, eligible: true }));
+
+    // s1 持有锁
+    const rel1 = await scheduler.acquireTurn('s1');
+    assert.ok(rel1);
+
+    // s2 和 s3 依次排队等待锁
+    const pS2 = scheduler.acquireTurn('s2');
+    const pS3 = scheduler.acquireTurn('s3');
+
+    // 在队列排队时，暂停调度器
+    scheduler.pause();
+
+    // 释放 s1 锁，触发 pumpQueue 唤醒 s2
+    rel1();
+
+    // s2 被唤醒后在 while 循环中检测到 paused，级联唤醒 s3 并返回 null
+    const resS2 = await pS2;
+    assert.equal(resS2, null);
+
+    // s3 同样被级联唤醒并返回 null，而不是永远挂起在 waitQueue 中
+    const resS3 = await pS3;
+    assert.equal(resS3, null);
+  });
 });

@@ -1,4 +1,4 @@
-import { ClientRuntime } from '../../../packages/core/dist/index.js';
+import { ClientRuntime } from '../../../packages/core/src/index.ts';
 import type { ServerConfigItem } from './settings.ts';
 import { createApi } from './api.ts';
 import { createTransport } from './transport.ts';
@@ -30,7 +30,7 @@ export interface WorkerDeps {
   player: {
     play: (musicId: string, durationMs: number, ownerName: string) => Promise<any>;
     stop: () => Promise<void> | void;
-    onProgress: (cb: (playedMs: number, positionMs: number, durationMs: number) => void) => void;
+    onProgress: (cb: (playedMs: number, positionMs: number, durationMs: number, observation?: any) => void) => (() => void) | void;
   };
   pushLog: (level: string, msg: string) => void;
   extraHeaders?: () => Record<string, string>;
@@ -45,6 +45,7 @@ export class ServerWorker {
   private pushLog: (level: string, msg: string) => void;
   private state: ServerRuntimeState;
   private currentReleaseTurn: (() => void) | null = null;
+  private unregisterProgress: (() => void) | null = null;
 
   constructor(deps: WorkerDeps) {
     this.config = deps.config;
@@ -145,6 +146,17 @@ export class ServerWorker {
       },
     };
 
+    const wrappedPlayer = {
+      ...deps.player,
+      onProgress: (cb: (playedMs: number, positionMs: number, durationMs: number, observation?: any) => void) => {
+        const unregister = deps.player.onProgress(cb);
+        if (typeof unregister === 'function') {
+          this.unregisterProgress = unregister;
+        }
+        return unregister;
+      },
+    };
+
     this.runtime = new ClientRuntime({
       adapter: {
         clientType: 'docker',
@@ -160,7 +172,7 @@ export class ServerWorker {
         hasPage: false,
       },
       transport: gatedTransport,
-      player: deps.player,
+      player: wrappedPlayer,
     } as any);
 
     this.transport = gatedTransport;
@@ -201,12 +213,20 @@ export class ServerWorker {
   }
 
   async stop(): Promise<void> {
+    if (this.unregisterProgress) {
+      this.unregisterProgress();
+      this.unregisterProgress = null;
+    }
     this.releaseCurrentTurn();
     this.scheduler.unregisterServer(this.config.id);
     await this.runtime.suspend('worker_stopped');
   }
 
   getState(): ServerRuntimeState {
+    this.state.name = this.config.name;
+    this.state.baseUrl = this.config.baseUrl;
+    this.state.enabled = this.config.enabled;
+    this.state.configured = Boolean(this.config.clientKey.trim());
     this.state.cooldownUntil = this.scheduler.getCooldownUntil(this.config.id);
     return { ...this.state };
   }

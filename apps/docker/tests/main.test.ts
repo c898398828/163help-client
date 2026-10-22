@@ -124,6 +124,7 @@ async function boot(hooks: Hooks = {}) {
     state: any;
     transport: any;
     currentReleaseTurn: (() => void) | null = null;
+    private unregisterProgress: (() => void) | null = null;
 
     constructor(deps: any) {
       this.config = deps.config;
@@ -171,7 +172,8 @@ async function boot(hooks: Hooks = {}) {
         api,
         getIdentity: deps.getIdentity,
         onHeartbeatRejected: deps.onHeartbeatRejected ?? ((failure: any) => {
-          this.pushLog('warn', `心跳未获确认：${failure.error}（HTTP ${failure.status} / 任务 ${failure.jobId}）`);
+          const tag = `[${this.config?.name || '心跳'}]`;
+          this.pushLog('warn', `${tag} 心跳未获确认：${failure.error}（HTTP ${failure.status} / 任务 ${failure.jobId}）`);
         }),
       });
 
@@ -213,6 +215,17 @@ async function boot(hooks: Hooks = {}) {
       };
       this.transport = gatedTransport;
 
+      const wrappedPlayer = {
+        ...deps.player,
+        onProgress: (cb: any) => {
+          const unregister = deps.player.onProgress(cb);
+          if (typeof unregister === 'function') {
+            this.unregisterProgress = unregister;
+          }
+          return unregister;
+        },
+      };
+
       this.runtime = new FakeRuntime({
         adapter: {
           clientType: 'docker',
@@ -228,7 +241,7 @@ async function boot(hooks: Hooks = {}) {
           hasPage: false,
         },
         transport: gatedTransport,
-        player: deps.player,
+        player: wrappedPlayer,
       });
 
       this.scheduler.registerServer(this.config.id, () => ({
@@ -267,12 +280,20 @@ async function boot(hooks: Hooks = {}) {
     }
 
     async stop(): Promise<void> {
+      if (this.unregisterProgress) {
+        this.unregisterProgress();
+        this.unregisterProgress = null;
+      }
       this.releaseCurrentTurn();
       this.scheduler.unregisterServer(this.config.id);
       await this.runtime.suspend('worker_stopped');
     }
 
     getState() {
+      this.state.name = this.config.name;
+      this.state.baseUrl = this.config.baseUrl;
+      this.state.enabled = this.config.enabled;
+      this.state.configured = Boolean(String(this.config.clientKey || '').trim());
       this.state.cooldownUntil = this.scheduler.getCooldownUntil(this.config.id);
       return { ...this.state };
     }
@@ -858,5 +879,40 @@ test('job:progress 在 jobId 不匹配时不污染当前任务进度', async () 
   // 当前任务进度正常更新
   app.runtime.bus.emit('job:progress', { jobId: 'job-1', playedMs: 12000 });
   assert.equal(app.state.job?.playedMs, 12000);
+});
+
+test('player.onProgress 集中维护单一 1000ms 定时器且不随热重载泄漏', async () => {
+  const app = await boot();
+  // 启动后只有全局唯一的 1000ms progressTimer
+  const initial1000Timers = app.timers.filter((t) => t.ms === 1000 && !t.cancelled);
+  assert.equal(initial1000Timers.length, 1);
+
+  // 热重载配置增删多个 Worker
+  await app.state.onConfig({
+    servers: [
+      { id: 'srv-1', name: '服务1', baseUrl: 'http://localhost/srv1', clientKey: 'mh_ck_srv1', enabled: true },
+      { id: 'srv-2', name: '服务2', baseUrl: 'http://localhost/srv2', clientKey: 'mh_ck_srv2', enabled: true },
+      { id: 'srv-3', name: '服务3', baseUrl: 'http://localhost/srv3', clientKey: 'mh_ck_srv3', enabled: true },
+    ],
+  });
+
+  // 1000ms 计时器仍然全局唯一，未因多 Worker 和热重载累积泄露
+  const after1000Timers = app.timers.filter((t) => t.ms === 1000 && !t.cancelled);
+  assert.equal(after1000Timers.length, 1);
+});
+
+test('handleHeartbeatRejected 携带当前任务服务端名称标签', async () => {
+  const app = await boot({
+    apiResponse: (url) => url.endsWith('/heartbeat')
+      ? { status: 200, payload: { ok: false, error: 'job_expired' } }
+      : { status: 200, payload: {} },
+  });
+
+  app.runtime.bus.emit('job:current', { jobId: 'job-named', musicName: '歌曲', targetMs: 60000 });
+  await app.transport.heartbeat('mh_ck_old', { jobId: 'job-named', positionMs: 5000 });
+
+  const rejectedLogs = app.state.logs.filter((l: any) => l.msg.includes('心跳未获确认'));
+  assert.equal(rejectedLogs.length, 1);
+  assert.match(rejectedLogs[0].msg, /^\[默认服务端\] 心跳未获确认：job_expired/);
 });
 

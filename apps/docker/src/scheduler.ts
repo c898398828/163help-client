@@ -87,7 +87,10 @@ export class MultiServerScheduler {
 
   async acquireTurn(serverId: string): Promise<(() => void) | null> {
     while (this.activeHolder !== null && this.activeHolder !== serverId) {
-      if (this.paused || !this.servers.some((s) => s.id === serverId)) return null;
+      if (this.paused || !this.servers.some((s) => s.id === serverId)) {
+        this.pumpQueue();
+        return null;
+      }
       await new Promise<void>((resolve) => {
         this.waitQueue.push(resolve);
       });
@@ -115,7 +118,10 @@ export class MultiServerScheduler {
 
   async requestNextTurn(): Promise<SchedulerTurnGrant | null> {
     while (this.activeHolder !== null) {
-      if (this.paused) return null;
+      if (this.paused) {
+        this.pumpQueue();
+        return null;
+      }
       await new Promise<void>((resolve) => {
         this.waitQueue.push(resolve);
       });
