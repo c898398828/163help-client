@@ -13,6 +13,7 @@ export class MultiServerScheduler {
   private servers: RegisteredServer[] = [];
   private cursor = 0;
   private activeHolder: string | null = null;
+  private holderCount = 0;
   private waitQueue: Array<() => void> = [];
   private paused = false;
   private readonly defaultCooldownMs: number;
@@ -31,14 +32,20 @@ export class MultiServerScheduler {
   }
 
   unregisterServer(id: string): void {
-    this.servers = this.servers.filter((s) => s.id !== id);
-    if (this.servers.length === 0) {
-      this.cursor = 0;
-    } else {
-      this.cursor = this.cursor % this.servers.length;
+    const idx = this.servers.findIndex((s) => s.id === id);
+    if (idx !== -1) {
+      this.servers.splice(idx, 1);
+      if (this.servers.length === 0) {
+        this.cursor = 0;
+      } else if (idx < this.cursor) {
+        this.cursor--;
+      } else if (this.cursor >= this.servers.length) {
+        this.cursor = 0;
+      }
     }
     if (this.activeHolder === id) {
       this.activeHolder = null;
+      this.holderCount = 0;
       this.pumpQueue();
     }
   }
@@ -46,7 +53,8 @@ export class MultiServerScheduler {
   setCooldown(serverId: string, ms?: number): void {
     const s = this.servers.find((x) => x.id === serverId);
     if (s) {
-      s.cooldownUntil = Date.now() + (typeof ms === 'number' ? ms : this.defaultCooldownMs);
+      const cooldownMs = typeof ms === 'number' && Number.isFinite(ms) ? ms : this.defaultCooldownMs;
+      s.cooldownUntil = Date.now() + cooldownMs;
     }
   }
 
@@ -66,6 +74,7 @@ export class MultiServerScheduler {
 
   reset(): void {
     this.activeHolder = null;
+    this.holderCount = 0;
     this.cursor = 0;
     this.paused = false;
     const q = this.waitQueue;
@@ -78,20 +87,28 @@ export class MultiServerScheduler {
 
   async acquireTurn(serverId: string): Promise<(() => void) | null> {
     while (this.activeHolder !== null && this.activeHolder !== serverId) {
-      if (this.paused) return null;
+      if (this.paused || !this.servers.some((s) => s.id === serverId)) return null;
       await new Promise<void>((resolve) => {
         this.waitQueue.push(resolve);
       });
     }
-    if (this.paused) {
+    if (this.paused || !this.servers.some((s) => s.id === serverId)) {
       this.pumpQueue();
       return null;
     }
     this.activeHolder = serverId;
+    this.holderCount++;
+    let released = false;
     return () => {
+      if (released) return;
+      released = true;
       if (this.activeHolder === serverId) {
-        this.activeHolder = null;
-        this.pumpQueue();
+        this.holderCount--;
+        if (this.holderCount <= 0) {
+          this.activeHolder = null;
+          this.holderCount = 0;
+          this.pumpQueue();
+        }
       }
     };
   }
@@ -130,12 +147,20 @@ export class MultiServerScheduler {
     }
 
     this.activeHolder = picked.id;
+    this.holderCount = 1;
+    let released = false;
     return {
       serverId: picked.id,
       release: (_outcome) => {
+        if (released) return;
+        released = true;
         if (this.activeHolder === picked.id) {
-          this.activeHolder = null;
-          this.pumpQueue();
+          this.holderCount--;
+          if (this.holderCount <= 0) {
+            this.activeHolder = null;
+            this.holderCount = 0;
+            this.pumpQueue();
+          }
         }
       },
     };

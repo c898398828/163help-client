@@ -339,4 +339,111 @@ describe('MultiServerScheduler 调度仲裁器', () => {
     assert.equal(t3?.serverId, 's1');
     t3.release('settled');
   });
+
+  test('acquireTurn 在 unregisterServer 后被唤醒不获锁并返回 null', async () => {
+    const scheduler = new MultiServerScheduler();
+    scheduler.registerServer('s1', () => ({ enabled: true, eligible: true }));
+    scheduler.registerServer('s2', () => ({ enabled: true, eligible: true }));
+
+    // s1 持有锁
+    const rel1 = await scheduler.acquireTurn('s1');
+    assert.ok(rel1);
+
+    // s2 排队等待
+    const pS2 = scheduler.acquireTurn('s2');
+
+    // 在 s2 排队时注销 s2
+    scheduler.unregisterServer('s2');
+
+    // 释放 s1
+    rel1();
+
+    // 被注销的 s2 唤醒后必须返回 null，不得非法获锁
+    const rel2 = await pS2;
+    assert.equal(rel2, null);
+  });
+
+  test('acquireTurn 在 reset 后被唤醒不获锁并返回 null', async () => {
+    const scheduler = new MultiServerScheduler();
+    scheduler.registerServer('s1', () => ({ enabled: true, eligible: true }));
+    scheduler.registerServer('s2', () => ({ enabled: true, eligible: true }));
+
+    const rel1 = await scheduler.acquireTurn('s1');
+    assert.ok(rel1);
+
+    const pS2 = scheduler.acquireTurn('s2');
+
+    // 重置调度器
+    scheduler.reset();
+
+    const rel2 = await pS2;
+    assert.equal(rel2, null);
+  });
+
+  test('重入 acquireTurn 引用计数：首个 release 不提前释放互斥锁，直至全部 release', async () => {
+    const scheduler = new MultiServerScheduler();
+    scheduler.registerServer('s1', () => ({ enabled: true, eligible: true }));
+    scheduler.registerServer('s2', () => ({ enabled: true, eligible: true }));
+
+    // s1 重入获取两次锁
+    const rel1A = await scheduler.acquireTurn('s1');
+    assert.ok(rel1A);
+    const rel1B = await scheduler.acquireTurn('s1');
+    assert.ok(rel1B);
+
+    // s2 排队等待
+    let s2Acquired = false;
+    const pS2 = scheduler.acquireTurn('s2').then((rel) => {
+      s2Acquired = true;
+      return rel;
+    });
+
+    // 释放第一次重入，s2 仍必须等待，锁未真正释放
+    rel1A();
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(s2Acquired, false);
+
+    // 释放第二次重入，此时锁才真正释放，s2 成功获锁
+    rel1B();
+    const rel2 = await pS2;
+    assert.equal(s2Acquired, true);
+    assert.ok(typeof rel2 === 'function');
+    rel2?.();
+  });
+
+  test('setCooldown 使用 NaN 或非法数值时回退到默认时长', async () => {
+    const scheduler = new MultiServerScheduler({ noTargetCooldownMs: 3000 });
+    scheduler.registerServer('s1', () => ({ enabled: true, eligible: true }));
+
+    const before = Date.now();
+    scheduler.setCooldown('s1', Number.NaN);
+    const cd = scheduler.getCooldownUntil('s1');
+    assert.ok(Number.isFinite(cd));
+    assert.ok(cd >= before + 3000 && cd <= before + 5000);
+  });
+
+  test('unregisterServer 校准 cursor 保持轮流调度顺序', async () => {
+    const scheduler = new MultiServerScheduler();
+    scheduler.registerServer('s0', () => ({ enabled: true, eligible: true }));
+    scheduler.registerServer('s1', () => ({ enabled: true, eligible: true }));
+    scheduler.registerServer('s2', () => ({ enabled: true, eligible: true }));
+
+    // 初始 cursor 为 0，调度 s0 后 cursor 指向 1（s1）
+    const t0 = await scheduler.requestNextTurn();
+    assert.equal(t0?.serverId, 's0');
+    t0.release('settled');
+
+    // 注销 s0（其索引 0 < 当前 cursor 1）
+    scheduler.unregisterServer('s0');
+
+    // 校验校准后 cursor 应当仍指向 s1
+    const t1 = await scheduler.requestNextTurn();
+    assert.equal(t1?.serverId, 's1');
+    t1.release('settled');
+
+    // 下一个应该轮到 s2
+    const t2 = await scheduler.requestNextTurn();
+    assert.equal(t2?.serverId, 's2');
+    t2.release('settled');
+  });
 });
