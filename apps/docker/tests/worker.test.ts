@@ -533,4 +533,64 @@ describe('ServerWorker 封装与 Core Runtime 协同', () => {
 
     await worker.stop();
   });
+
+  test('ServerWorker 支持自定义 onHeartbeatRejected 委托回调', async () => {
+    const rejections: Array<{ jobId: string; status: number; error: string }> = [];
+    const { deps } = createMockDeps({
+      onHeartbeatRejected: (f) => {
+        rejections.push(f);
+      },
+    });
+    const worker = new ServerWorker(deps);
+
+    const origFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = async () =>
+        new Response(JSON.stringify({ ok: false, error: 'job_not_active' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+
+      const transport = worker.transport;
+      const ok = await transport.heartbeat('dummy_token', {
+        jobId: 'j-custom',
+        playedMs: 1000,
+      });
+
+      assert.equal(ok, false);
+      assert.equal(rejections.length, 1);
+      assert.equal(rejections[0].jobId, 'j-custom');
+      assert.equal(rejections[0].error, 'job_not_active');
+    } finally {
+      globalThis.fetch = origFetch;
+      await worker.stop();
+    }
+  });
+
+  test('ServerWorker 支持 extraHeaders 透传至 API 请求头', async () => {
+    let capturedVipType = '';
+    const { deps } = createMockDeps({
+      extraHeaders: () => ({ 'X-Vip-Type': '11' }),
+    });
+    const worker = new ServerWorker(deps);
+
+    const origFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = async (_url, init) => {
+        const headers = new Headers(init?.headers);
+        capturedVipType = headers.get('X-Vip-Type') || '';
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      };
+
+      const transport = worker.transport;
+      await transport.me();
+      assert.equal(capturedVipType, '11');
+    } finally {
+      globalThis.fetch = origFetch;
+      await worker.stop();
+    }
+  });
 });

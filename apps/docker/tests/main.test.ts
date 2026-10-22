@@ -808,3 +808,55 @@ test('main 启动时支持 SERVER_1_URL / SERVER_1_KEY 注入多服务端', asyn
   }
 });
 
+test('main 配置热重载时当服务端 baseUrl 发生变化重新实例化 Worker', async () => {
+  const app = await boot();
+  const origWorker = app.state.servers[0];
+  assert.equal(origWorker.baseUrl, 'http://localhost');
+
+  // 更新该服务端的 baseUrl
+  await app.state.onConfig({
+    servers: [
+      { id: 'default', name: '默认服务端', baseUrl: 'http://localhost:9999', clientKey: 'mh_ck_old', enabled: true },
+    ],
+  });
+
+  assert.equal(app.state.servers[0].baseUrl, 'http://localhost:9999');
+});
+
+test('环境变量注入的服务端在 Web 端保存配置时持久化且不被擦除', async () => {
+  const origUrl = process.env.SERVER_1_URL;
+  const origKey = process.env.SERVER_1_KEY;
+  try {
+    process.env.SERVER_1_URL = 'http://localhost:8001';
+    process.env.SERVER_1_KEY = 'mh_ck_env1';
+
+    const app = await boot({ config: { neteaseCookie: 'MUSIC_U=init' } });
+    // 验证启动时已持久化
+    assert.equal(app.config().servers?.some((s: any) => s.id === 'env-1'), true);
+
+    // 仅更新 cookie
+    await app.state.onConfig({ cookie: 'MUSIC_U=updated' });
+
+    // 验证环境变量服务依然存在于配置与 Worker 列表中
+    assert.equal(app.config().servers?.some((s: any) => s.id === 'env-1'), true);
+    assert.equal(app.state.servers.some((s: any) => s.id === 'env-1'), true);
+  } finally {
+    if (origUrl !== undefined) process.env.SERVER_1_URL = origUrl; else delete process.env.SERVER_1_URL;
+    if (origKey !== undefined) process.env.SERVER_1_KEY = origKey; else delete process.env.SERVER_1_KEY;
+  }
+});
+
+test('job:progress 在 jobId 不匹配时不污染当前任务进度', async () => {
+  const app = await boot();
+  app.runtime.bus.emit('job:current', { jobId: 'job-1', musicName: '当前歌', targetMs: 100000 });
+  assert.equal(app.state.job?.playedMs, 0);
+
+  // 模拟旧任务的迟到进度上报
+  app.runtime.bus.emit('job:progress', { jobId: 'old-job-0', playedMs: 50000 });
+  assert.equal(app.state.job?.playedMs, 0);
+
+  // 当前任务进度正常更新
+  app.runtime.bus.emit('job:progress', { jobId: 'job-1', playedMs: 12000 });
+  assert.equal(app.state.job?.playedMs, 12000);
+});
+

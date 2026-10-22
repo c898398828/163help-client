@@ -31,9 +31,11 @@ const cfg = {
 };
 
 /** 环境变量合并注入与向前兼容迁移 */
-function injectEnvConfig(cur: SessionConfig, defaultBase: string): SessionConfig {
+function injectEnvConfig(cur: SessionConfig, defaultBase: string): boolean {
+  let changed = false;
   if (!cur.clientKey && process.env.CLIENT_KEY?.trim()) {
     cur.clientKey = process.env.CLIENT_KEY.trim();
+    changed = true;
   }
   migrateLegacyConfig(cur, defaultBase);
   if (!cur.servers) cur.servers = [];
@@ -54,17 +56,20 @@ function injectEnvConfig(cur: SessionConfig, defaultBase: string): SessionConfig
           clientKey: sKey,
           enabled: true,
         });
+        changed = true;
       }
     }
   }
   if (cur.servers.length > 0 && !cur.clientKey && cur.servers[0].clientKey) {
     cur.clientKey = cur.servers[0].clientKey;
   }
-  return cur;
+  return changed;
 }
 
 const boot = cfg.load();
-injectEnvConfig(boot, BASE);
+if (injectEnvConfig(boot, BASE)) {
+  cfg.save(boot);
+}
 
 function isConfigured(c: SessionConfig): boolean {
   const cookie = String(c.neteaseCookie || '').trim();
@@ -281,7 +286,11 @@ function bindWorkerEvents(worker: ServerWorker): void {
     } : null;
   });
   worker.runtime.bus.on('job:settled', (s: any) => { if (s?.credited) state.jobsDone += 1; });
-  worker.runtime.bus.on('job:progress', (p: any) => { if (state.job) state.job.playedMs = p.playedMs; });
+  worker.runtime.bus.on('job:progress', (p: any) => {
+    if (state.job && (!p?.jobId || p.jobId === currentJobId)) {
+      state.job.playedMs = p.playedMs;
+    }
+  });
   worker.runtime.bus.on('heartbeat:tick', (t: any) => {
     if (!currentJobId || t.jobId !== currentJobId) return;
     lastHeartbeatFailure = '';
@@ -313,7 +322,7 @@ function createWorkerInstance(server: ServerConfigItem): ServerWorker {
     pushLog,
     extraHeaders: () => ({ 'X-Vip-Type': String(vipTypeCache) }),
     onHeartbeatRejected: handleHeartbeatRejected,
-  } as any);
+  });
   bindWorkerEvents(w);
   return w;
 }
@@ -334,10 +343,16 @@ function reconcileWorkers(cur: SessionConfig): void {
   for (const server of currentServers) {
     const existing = workers.get(server.id);
     if (existing) {
-      existing.config.name = server.name;
-      existing.config.baseUrl = server.baseUrl;
-      existing.config.clientKey = server.clientKey;
-      existing.config.enabled = server.enabled;
+      if (existing.config.baseUrl !== server.baseUrl) {
+        // baseUrl 变化导致底层 API 实例需重置，注销旧 Worker 并新建
+        void existing.stop().catch(() => {});
+        const w = createWorkerInstance(server);
+        workers.set(server.id, w);
+      } else {
+        existing.config.name = server.name;
+        existing.config.clientKey = server.clientKey;
+        existing.config.enabled = server.enabled;
+      }
     } else {
       const w = createWorkerInstance(server);
       workers.set(server.id, w);
@@ -402,6 +417,7 @@ async function recoverBrowser(): Promise<void> {
 /** 保存串行化：旧凭证任务排空 → 落盘 → 应用；应用失败必须让管理端返回错误。 */
 state.onConfig = (patch: ConfigPatch) => serializeLifecycle(async () => {
   const cur = cfg.load();
+  injectEnvConfig(cur, BASE);
   const oldCookie = String(cur.neteaseCookie || '');
   const oldKey = String(cur.clientKey || '');
   const oldServersJson = JSON.stringify(cur.servers || []);

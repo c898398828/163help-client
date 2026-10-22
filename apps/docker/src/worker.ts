@@ -33,11 +33,14 @@ export interface WorkerDeps {
     onProgress: (cb: (playedMs: number, positionMs: number, durationMs: number) => void) => void;
   };
   pushLog: (level: string, msg: string) => void;
+  extraHeaders?: () => Record<string, string>;
+  onHeartbeatRejected?: (failure: { jobId: string; status: number; error: string }) => void;
 }
 
 export class ServerWorker {
   readonly config: ServerConfigItem;
   readonly runtime: ClientRuntime;
+  readonly transport: any;
   private scheduler: MultiServerScheduler;
   private pushLog: (level: string, msg: string) => void;
   private state: ServerRuntimeState;
@@ -82,7 +85,7 @@ export class ServerWorker {
       version: deps.clientVersion,
       clientType: 'docker',
       getToken: () => this.config.clientKey,
-      extraHeaders: () => ({}),
+      extraHeaders: deps.extraHeaders ?? (() => ({})),
       onResult: setLastApi,
     });
 
@@ -90,7 +93,11 @@ export class ServerWorker {
       api,
       getIdentity: deps.getIdentity,
       onHeartbeatRejected: (f) => {
-        this.pushLog('warn', `[${this.config.name}] 心跳未获确认：${f.error}（任务 ${f.jobId}）`);
+        if (deps.onHeartbeatRejected) {
+          deps.onHeartbeatRejected(f);
+        } else {
+          this.pushLog('warn', `[${this.config.name}] 心跳未获确认：${f.error}（任务 ${f.jobId}）`);
+        }
       },
     });
 
@@ -155,6 +162,8 @@ export class ServerWorker {
       transport: gatedTransport,
       player: deps.player,
     } as any);
+
+    this.transport = gatedTransport;
 
     this.scheduler.registerServer(this.config.id, () => ({
       enabled: this.config.enabled,
