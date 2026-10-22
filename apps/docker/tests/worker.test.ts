@@ -115,9 +115,9 @@ describe('ServerWorker 封装与 Core Runtime 协同', () => {
     assert.equal(state.acctName, '');
     assert.equal(state.credits, 0);
     assert.equal(state.helpUsed, 0);
-    assert.equal(state.helpLimit, 9000);
+    assert.equal(state.helpLimit, null);
     assert.equal(state.recv, 0);
-    assert.equal(state.recvLimit, 26);
+    assert.equal(state.recvLimit, null);
     assert.equal(state.jobsDone, 0);
     assert.equal(state.lastApi, null);
     assert.equal(state.cooldownUntil, 0);
@@ -689,5 +689,38 @@ describe('ServerWorker 封装与 Core Runtime 协同', () => {
 
     await worker.stop();
     assert.equal(unregisterCalled, true);
+  });
+
+  test('从服务端下发的 participant 动态解析真实限额与余额，不写死固定值', async () => {
+    const { deps } = createMockDeps();
+    const worker = new ServerWorker(deps);
+
+    // 初始应为未获取状态 (null)
+    assert.equal(worker.getState().helpLimit, null);
+    assert.equal(worker.getState().recvLimit, null);
+
+    // 模拟服务端响应包含自定义限额（例如帮听限额 18000s，被助 50次，余额 88.5，用户 TestUser）
+    worker.updateLimitsAndAccount({
+      participant: {
+        help_seconds_limit: 18000,
+        help_seconds_used: 3500,
+        today_received_limit: 50,
+        received_finished_count_24h: 12,
+        available_credits: 88.5,
+      },
+      user: {
+        displayName: 'TestUser',
+      },
+    });
+
+    const state = worker.getState();
+    assert.equal(state.helpLimit, 18000);
+    assert.equal(state.helpUsed, 3500);
+    assert.equal(state.recvLimit, 50);
+    assert.equal(state.recv, 12);
+    assert.equal(state.credits, 88.5);
+    assert.equal(state.acctName, 'TestUser');
+
+    await worker.stop();
   });
 });

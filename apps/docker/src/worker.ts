@@ -14,9 +14,9 @@ export interface ServerRuntimeState {
   acctName: string;
   credits: number;
   helpUsed: number;
-  helpLimit: number;
+  helpLimit: number | null;
   recv: number;
-  recvLimit: number;
+  recvLimit: number | null;
   jobsDone: number;
   lastApi: { ok: boolean; status: number; at: number; error?: string } | null;
   cooldownUntil: number;
@@ -62,9 +62,9 @@ export class ServerWorker {
       acctName: '',
       credits: 0,
       helpUsed: 0,
-      helpLimit: 9000,
+      helpLimit: null,
       recv: 0,
-      recvLimit: 26,
+      recvLimit: null,
       jobsDone: 0,
       lastApi: null,
       cooldownUntil: 0,
@@ -104,6 +104,13 @@ export class ServerWorker {
 
     const gatedTransport = {
       ...transport,
+      me: async () => {
+        const res = await transport.me();
+        if (res.status === 200 && res.payload) {
+          this.updateLimitsAndAccount(res.payload);
+        }
+        return res;
+      },
       next: async (token: string) => {
         if (!this.config.enabled) {
           return { status: 200, payload: { musicId: null, noTargetReason: 'server_disabled' } };
@@ -116,6 +123,9 @@ export class ServerWorker {
         this.currentReleaseTurn = releaseTurn;
         try {
           const res = await transport.next(token);
+          if (res.status === 200 && res.payload) {
+            this.updateLimitsAndAccount(res.payload);
+          }
           if (!res.payload || !res.payload.jobId || !res.payload.musicId) {
             // 无单或失败，立即让出播放权
             if (res.payload?.noTargetReason) {
@@ -132,7 +142,11 @@ export class ServerWorker {
       },
       finish: async (token: string, input: any) => {
         try {
-          return await transport.finish(token, input);
+          const res = await transport.finish(token, input);
+          if (res.status === 200 && res.payload) {
+            this.updateLimitsAndAccount(res.payload);
+          }
+          return res;
         } finally {
           this.releaseCurrentTurn();
         }
@@ -197,6 +211,24 @@ export class ServerWorker {
     this.runtime.bus.on('log:append', (e: any) => {
       this.pushLog(e.level, `[${this.config.name}] ${e.msg}`);
     });
+  }
+
+  updateLimitsAndAccount(data: any): void {
+    if (!data || typeof data !== 'object') return;
+    const pt = data.participant ?? data;
+    const hLimit = pt.help_seconds_limit ?? pt.effective_help_seconds_limit ?? pt.today_helped_limit ?? pt.effectiveHelpSecondsLimit ?? data.helpedLimit;
+    const rLimit = pt.today_received_limit ?? pt.received_limit ?? pt.receivedLimit ?? data.receivedLimit;
+    const hUsed = pt.help_seconds_used ?? pt.today_helped_seconds ?? pt.today_helped_count ?? pt.todayHelpedSeconds ?? data.helpedToday;
+    const rUsed = pt.received_finished_count_24h ?? pt.today_received_help_count ?? pt.received_today ?? pt.receivedToday ?? data.receivedToday;
+    const cred = pt.available_credits ?? pt.availableCredits ?? pt.credits ?? data.credits;
+    const name = data.user?.displayName || pt.user?.displayName || data.displayName;
+
+    if (typeof hLimit === 'number' && Number.isFinite(hLimit) && hLimit > 0) this.state.helpLimit = hLimit;
+    if (typeof rLimit === 'number' && Number.isFinite(rLimit) && rLimit > 0) this.state.recvLimit = rLimit;
+    if (typeof hUsed === 'number' && Number.isFinite(hUsed)) this.state.helpUsed = hUsed;
+    if (typeof rUsed === 'number' && Number.isFinite(rUsed)) this.state.recv = rUsed;
+    if (typeof cred === 'number' && Number.isFinite(cred)) this.state.credits = cred;
+    if (typeof name === 'string' && name.trim()) this.state.acctName = name.trim();
   }
 
   private releaseCurrentTurn(): void {

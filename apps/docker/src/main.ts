@@ -88,6 +88,7 @@ const state: Record<string, any> = {
   jobsDone: 0,
   acctName: '',
   credits: 0,
+  neteaseUser: null as { id: string; name: string; vipType: number } | null,
   configured: isConfigured(boot),
   browserReady: false,
   authStatus: '',
@@ -177,6 +178,7 @@ async function launchBrowser(): Promise<boolean> {
         browser = null;
         state.browserReady = false;
         vipTypeCache = 0;
+        state.neteaseUser = null;
         scheduler.pause();
         pushLog('error', `浏览器已不可用（${reason}），暂停任务后自动重连`);
         void serializeLifecycle(async () => {
@@ -211,10 +213,13 @@ async function launchBrowser(): Promise<boolean> {
 async function refreshIdentity() {
   const b = browser;
   const empty = { id: '', name: '', vipType: 0 };
-  if (!b) { vipTypeCache = 0; return empty; }
+  if (!b) { vipTypeCache = 0; state.neteaseUser = null; return empty; }
   const ident = await b.identity();
   if (browser !== b) return empty;
   vipTypeCache = Number.isFinite(ident.vipType) ? ident.vipType : 0;
+  if (ident.id || ident.name) {
+    state.neteaseUser = { id: String(ident.id || ''), name: String(ident.name || ''), vipType: vipTypeCache };
+  }
   return ident;
 }
 
@@ -428,6 +433,7 @@ async function recoverBrowser(): Promise<void> {
       browser = null;
       state.browserReady = false;
       vipTypeCache = 0;
+      state.neteaseUser = null;
       pushLog('warn', '浏览器实例已不可用，重建中');
       try { await dead.close(); } catch { /* 已不可用 */ }
     }
@@ -458,7 +464,10 @@ state.onConfig = (patch: ConfigPatch) => serializeLifecycle(async () => {
 
   cfg.save(cur); // 写盘失败会抛出；此时旧任务已安全暂停，后续保存可重试
   state.configured = isConfigured(cur);
-  if (cookieChanged) vipTypeCache = 0;
+  if (cookieChanged) {
+    vipTypeCache = 0;
+    state.neteaseUser = null;
+  }
   if (!state.configured) {
     state.acctName = ''; state.credits = 0; state.authStatus = 'logged_out';
   }

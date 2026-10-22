@@ -115,6 +115,7 @@ export function createStatusServer({ port, state, staticDir }: { port: number; s
             configured: state.configured === true,
             acctName: state.acctName || '',
             credits: state.credits || 0,
+            neteaseUser: state.neteaseUser ?? null,
             authStatus: state.authStatus || '',
             lastApi: state.lastApi ?? null,
             jobsDone: state.jobsDone || 0,

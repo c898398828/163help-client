@@ -288,7 +288,7 @@ ${isAuthed ? `
         <div class="card glass"><div class="lbl">今日帮听</div><div class="v" id="help">—<span class="u"> / 9000s</span></div><div class="bar"><i id="helpBar"></i></div></div>
         <div class="card glass"><div class="lbl">今日被助</div><div class="v" id="recv">—<span class="u"> / 26次</span></div><div class="bar"><i id="recvBar"></i></div></div>
         <div class="card glass"><div class="lbl">连续运行</div><div class="v" id="up">—</div><div class="sub"><span id="jobsDone">0</span> 单已完成</div></div>
-        <div class="card glass"><div class="lbl">账号</div><div class="v" style="font-size:15px" id="acct">—</div><div class="sub" id="acctInfo">—</div></div>
+        <div class="card glass"><div class="lbl">网易云账号</div><div class="v" style="font-size:15px" id="acct">—</div><div class="sub" id="acctInfo">—</div></div>
       </div>
 
       <div id="serverCards" class="srv-cards"></div>
@@ -525,12 +525,21 @@ function renderStats(d){
   $('recvBar').style.width=(rl>0?Math.min(100,(d.recv||0)/rl*100):0)+'%';
   $('up').textContent=fmtUp(d.uptime||0);$('footup').textContent=fmtUp(d.uptime||0);
   showNumber('jobsDone',d.jobsDone||0,function(n){$('jobsDone').textContent=String(n)});
-  if(d.configured){
-    $('acct').textContent=d.acctName||'密钥模式';
-    $('acctInfo').textContent=(d.acctName?'已登录':'凭证已配置')+(d.credits?' · 额度 '+d.credits:'');
+  var nu=d.neteaseUser;
+  if(nu&&(nu.name||nu.id)){
+    $('acct').textContent=nu.name||('ID: '+nu.id);
+    var vip=nu.vipType>0?'黑胶 VIP':'标准用户';
+    var idText=nu.id?' · ID: '+nu.id:'';
+    $('acctInfo').textContent='已登录 · '+vip+idText;
+  }else if(d.acctName){
+    $('acct').textContent=d.acctName;
+    $('acctInfo').textContent=(d.configured?'已登录':'未登录')+(d.credits?' · 额度 '+d.credits:'');
+  }else if(d.configured){
+    $('acct').textContent=d.browserReady?'已就绪':'连接中…';
+    $('acctInfo').textContent=d.browserReady?'网易云登录正常':'正在启动浏览器…';
   }else{
     $('acct').textContent='未配置';
-    $('acctInfo').innerHTML='<a onclick="goCfg()">去设置粘贴 Cookie 与密钥</a>';
+    $('acctInfo').innerHTML='<a onclick="goCfg()">去设置粘贴网易云 Cookie</a>';
   }
 }
 function goCfg(){var n=document.querySelector('.nav[data-v=cfg]');if(n)n.click()}
@@ -578,7 +587,10 @@ function renderServerCards(d){
     else if(s.lastApi&&s.lastApi.ok){tagCls='ok';tagText='正常'}
     else{tagCls='idle';tagText='就绪'}
 
-    var acct=s.acctName?(esc(s.acctName)+(s.credits!=null?' · '+s.credits+'分':'')):(s.configured?'密钥就绪':'未登录');
+    var userText=s.acctName?esc(s.acctName):(s.configured?'密钥就绪':'未配置');
+    var creditText=(s.credits!=null&&s.configured)?(s.credits+' 分'):'—';
+    var helpLimitText=(s.helpLimit!=null&&s.helpLimit>0)?(s.helpLimit+'s'):'—';
+    var recvLimitText=(s.recvLimit!=null&&s.recvLimit>0)?(s.recvLimit+'次'):'—';
     var apiText=s.lastApi?(s.lastApi.ok?'连通正常 · '+ago(s.lastApi.at):'异常 '+(s.lastApi.status||'')+' · '+ago(s.lastApi.at)):'尚无请求';
 
     return '<div class="srv-card glass">' +
@@ -587,10 +599,12 @@ function renderServerCards(d){
         '<span class="srv-tag '+tagCls+'">'+tagText+'</span>' +
       '</div>' +
       '<div class="srv-grid2">' +
-        '<div>帮听: <b>'+(s.helpUsed||0)+'s</b> / '+(s.helpLimit??9000)+'s</div>' +
-        '<div>被助: <b>'+(s.recv||0)+'次</b> / '+(s.recvLimit??26)+'次</div>' +
+        '<div>余额: <b style="color:var(--ok)">'+creditText+'</b></div>' +
+        '<div>用户: <b>'+userText+'</b></div>' +
+        '<div>帮听: <b>'+(s.helpUsed||0)+'s</b> / '+helpLimitText+'</div>' +
+        '<div>被助: <b>'+(s.recv||0)+'次</b> / '+recvLimitText+'</div>' +
         '<div>完成: <b>'+(s.jobsDone||0)+'</b> 单</div>' +
-        '<div>账号: <b>'+acct+'</b></div>' +
+        '<div>状态: <b>'+(s.enabled?(s.configured?'运行中':'未就绪'):'已停用')+'</b></div>' +
       '</div>' +
       '<div class="srv-foot">' +
         '<span class="srv-url" title="'+esc(s.baseUrl)+'">'+esc(s.baseUrl)+'</span>' +
