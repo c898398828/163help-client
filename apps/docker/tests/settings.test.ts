@@ -56,6 +56,8 @@ describe('多服务端与配置迁移改造', () => {
   test('normalizeServerUrl 规范化 URL', () => {
     assert.equal(normalizeServerUrl('https://163music.linyu.qzz.io/'), 'https://163music.linyu.qzz.io');
     assert.equal(normalizeServerUrl('http://192.168.1.100:8080/api/'), 'http://192.168.1.100:8080/api');
+    assert.equal(normalizeServerUrl('https://163help.daigua.icu/portal'), 'https://163help.daigua.icu');
+    assert.equal(normalizeServerUrl('https://163help.daigua.icu/portal/'), 'https://163help.daigua.icu');
   });
 
   test('migrateLegacyConfig 自动将旧版单 key 转换为 servers 数组', () => {

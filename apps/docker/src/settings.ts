@@ -39,7 +39,10 @@ const KEY_PREFIX = 'mh_ck_';
 
 export function normalizeServerUrl(url: string): string {
   if (!url || typeof url !== 'string') return '';
-  return url.trim().replace(/\/+$/, '');
+  let u = url.trim().replace(/\/+$/, '');
+  // 自动剥除从浏览器地址栏复制时误带的 /portal 前端网页路由
+  u = u.replace(/\/portal\/?$/i, '');
+  return u.replace(/\/+$/, '');
 }
 
 export function migrateLegacyConfig(cur: SessionConfig, defaultBaseUrl: string = 'https://163music.linyu.qzz.io'): SessionConfig {

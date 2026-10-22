@@ -662,7 +662,7 @@ function renderServerRows(){
       '</div>' +
       '<div class="srv-grid">' +
         '<div><label>备注名</label><input value="'+esc(s.name)+'" placeholder="如：主服" oninput="updateServerName('+i+',this.value)"/></div>' +
-        '<div><label>API 地址</label><input value="'+esc(s.baseUrl)+'" placeholder="如：https://..." oninput="updateServerUrl('+i+',this.value)"/></div>' +
+        '<div><label>API 地址</label><input value="'+esc(s.baseUrl)+'" placeholder="如：https://163help.daigua.icu（根域名，不带/portal）" oninput="updateServerUrl('+i+',this.value)"/></div>' +
       '</div>' +
       '<div><label>Portal 客户端密钥（mh_ck_ 开头）</label><input type="password" value="'+esc(s.clientKey)+'" placeholder="' + kp + '" oninput="updateServerKey('+i+',this.value)"/></div>' +
     '</div>';
