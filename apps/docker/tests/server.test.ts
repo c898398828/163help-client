@@ -169,6 +169,36 @@ describe('docker 管理端 会话与状态', () => {
       assert.equal((await res.json()).runtimeBlocked, undefined);
     } finally { server.closeAllConnections(); server.close(); }
   });
+
+  test('/api/state 透出 servers 数组', async () => {
+    const mockServers = [
+      {
+        id: 'srv-1',
+        name: '主服',
+        baseUrl: 'https://srv1.example.com',
+        enabled: true,
+        configured: true,
+        authStatus: 'ok',
+        acctName: '用户甲',
+        credits: 100,
+        helpUsed: 120,
+        helpLimit: 9000,
+        recv: 5,
+        recvLimit: 26,
+        jobsDone: 8,
+        lastApi: { ok: true, status: 200, at: 1_700_000_000_000 },
+        cooldownUntil: 0,
+      },
+    ];
+    const { server, base } = await start({ servers: mockServers });
+    try {
+      const cookie = await login(base);
+      const res = await fetch(base + '/api/state', { headers: { Cookie: cookie } });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.deepEqual(body.servers, mockServers);
+    } finally { server.closeAllConnections(); server.close(); }
+  });
 });
 
 describe('docker 管理端 背景静态文件', () => {

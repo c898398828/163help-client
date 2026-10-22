@@ -85,6 +85,28 @@ describe('docker 管理端页面模板', () => {
     // 日志自身是滚动容器，且可收缩到 0（min-height:0）
     assert.match(authed, /\.log\{[^}]*overflow:\s*auto[^}]*flex:\s*1[^}]*min-height:\s*0/);
   });
+
+  test('支持多服务端卡片展示与管理容器', () => {
+    for (const marker of ['id="serverCards"', 'id="nowServerBadge"', 'id="serverListContainer"', 'id="addServerBtn"', 'id="ncookie"', 'id="nkey"']) {
+      assert.ok(authed.includes(marker), `缺少 ${marker}`);
+    }
+    assert.ok(authed.includes('添加服务端'), '应有添加服务端按钮文案');
+  });
+
+  test('Now Playing 包含服务端标识徽章与日志前缀标签类', () => {
+    assert.ok(authed.includes('id="nowServerBadge"'));
+    assert.ok(authed.includes('class="srv-badge hidden"'));
+    assert.ok(authed.includes('.srv-badge{'));
+    assert.ok(authed.includes('.ltag{'));
+    assert.ok(authed.includes('.srv-cards{'));
+    assert.ok(authed.includes('.srv-card{'));
+  });
+
+  test('前端脚本正确定义多服务端卡片与管理操作函数', () => {
+    for (const fn of ['renderServerCards', 'initServersFromState', 'renderServerRows', 'addServerRow', 'removeServerRow', 'updateServerName', 'updateServerUrl', 'updateServerKey', 'updateServerEnabled']) {
+      assert.ok(authed.includes(`function ${fn}`), `缺少函数定义 ${fn}`);
+    }
+  });
 });
 
 test('/api/state 保留显式零额度，仅在缺省时使用默认额度', async (t) => {

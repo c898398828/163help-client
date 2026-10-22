@@ -200,6 +200,31 @@ button{font:inherit}
 .toast.show{opacity:1;transform:none}
 .toast.bad{border-color:rgba(255,107,107,.5);color:var(--err)}
 :focus-visible{outline:2px solid var(--red);outline-offset:2px;border-radius:4px}
+/* ---- 多服务端卡片与管理表单 ---- */
+.srv-badge{display:inline-flex;align-items:center;padding:1px 7px;border-radius:4px;font-size:10.5px;font-weight:600;background:var(--redbg);color:var(--red2);border:1px solid rgba(236,65,65,.3)}
+.ltag{display:inline-block;padding:0 5px;border-radius:3px;font-size:10px;font-weight:600;background:var(--redbg);color:var(--red2);border:1px solid rgba(236,65,65,.25);margin-right:5px;vertical-align:baseline}
+.srv-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+.srv-card{padding:13px 14px;border-radius:var(--r);display:flex;flex-direction:column;gap:8px;transition:transform .2s var(--ease),border-color .2s ease}
+.srv-card:hover{transform:translateY(-2px);border-color:rgba(236,65,65,.35)}
+.srv-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.srv-name{font-weight:600;font-size:13px;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.srv-tag{font-size:10.5px;padding:2px 7px;border-radius:999px;font-weight:600}
+.srv-tag.ok{background:rgba(61,220,151,.15);color:var(--ok)}
+.srv-tag.warn{background:rgba(245,185,63,.15);color:var(--warn)}
+.srv-tag.err{background:rgba(255,107,107,.15);color:var(--err)}
+.srv-tag.idle{background:var(--line);color:var(--t3)}
+.srv-grid2{display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;font-size:11px;color:var(--t2);font-family:var(--mono)}
+.srv-grid2 b{color:var(--t1);font-weight:600}
+.srv-foot{font-size:10.5px;color:var(--t3);border-top:1px dashed var(--line2);padding-top:6px;display:flex;justify-content:space-between;align-items:center;overflow:hidden}
+.srv-url{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:65%;font-family:var(--mono)}
+.srv-list{display:flex;flex-direction:column;gap:10px;margin-top:10px}
+.srv-item{background:var(--input);border:1px solid var(--line);border-radius:var(--rs);padding:12px;display:flex;flex-direction:column;gap:8px}
+.srv-item-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.srv-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.srv-item label{margin:0 0 4px;font-size:11px}
+.srv-item input{padding:7px 10px;font-size:12px}
+.srv-check{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--t2);cursor:pointer;user-select:none}
+.srv-check input{width:auto;margin:0;cursor:pointer}
 /* ---- 登录 ---- */
 .login{position:relative;z-index:1;min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:20px}
 .login-card{width:min(400px,100%);padding:22px 22px 20px;animation:rise .4s var(--ease) both}
@@ -214,7 +239,9 @@ button{font:inherit}
   .side .foot{display:none}
   .nav{white-space:nowrap}
   .cards{grid-template-columns:1fr 1fr}
+  .srv-cards{grid-template-columns:1fr}
   .row2{grid-template-columns:1fr}
+  .srv-grid{grid-template-columns:1fr}
   .main{padding:12px;overflow:visible}
   .now-name{font-size:22px}
 }
@@ -243,6 +270,7 @@ ${isAuthed ? `
       <div class="now glass">
         <div class="now-head">
           <span class="eyebrow">Now Playing</span>
+          <span class="srv-badge hidden" id="nowServerBadge"></span>
           <i class="dot idle" id="nowDot"></i>
           <span class="now-state" id="nowState">连接中…</span>
           <span class="sp"></span>
@@ -262,6 +290,8 @@ ${isAuthed ? `
         <div class="card glass"><div class="lbl">连续运行</div><div class="v" id="up">—</div><div class="sub"><span id="jobsDone">0</span> 单已完成</div></div>
         <div class="card glass"><div class="lbl">账号</div><div class="v" style="font-size:15px" id="acct">—</div><div class="sub" id="acctInfo">—</div></div>
       </div>
+
+      <div id="serverCards" class="srv-cards"></div>
 
       <div class="panel glass logpanel">
         <div class="p-head">
@@ -310,10 +340,17 @@ ${isAuthed ? `
         <div class="p-head"><span class="eyebrow">账号配置</span></div>
         <label>网易云 Cookie（完整串，含 MUSIC_U=…）</label>
         <textarea id="ncookie" placeholder="MUSIC_U=…; __csrf=…; …"></textarea>
-        <label>Portal 客户端密钥（mh_ck_ 开头，个人中心获取）</label>
-        <input id="nkey" placeholder="mh_ck_xxxxxxxx"/>
+        <input id="nkey" type="hidden" placeholder="mh_ck_xxxxxxxx"/>
+      </div>
+      <div class="panel glass">
+        <div class="p-head">
+          <span class="eyebrow">互助服务端管理</span>
+          <span class="sp"></span>
+          <button class="tool" id="addServerBtn" type="button" onclick="addServerRow()">+ 添加服务端</button>
+        </div>
+        <div id="serverListContainer" class="srv-list"></div>
         <div style="margin-top:14px"><button class="btn" onclick="saveCfg()">保存并应用</button><button class="btn ghost" onclick="clearCfg()">清除配置</button></div>
-        <div class="tip">保存后立即生效（Cookie 重载页面、密钥就绪即开始领单）；数据持久化于 /data，升级不丢。<br>留空的输入不会覆盖已保存值，要清空请用「清除配置」。忘记密码：./vps-setup.sh show-password</div>
+        <div class="tip">保存后立即生效（Cookie 重载页面、服务端密钥就绪即开始领单）；数据持久化于 /data，升级不丢。<br>留空的输入不会覆盖已保存值，要清空请用「清除配置」。忘记密码：./vps-setup.sh show-password</div>
       </div>
       <div class="panel glass">
         <div class="p-head"><span class="eyebrow">外观</span><span class="sp"></span><span class="tip" style="margin:0">只保存在这台浏览器里</span></div>
@@ -373,6 +410,7 @@ syncPrefUI();
 document.querySelectorAll('.nav').forEach(function(n){n.onclick=function(){
   document.querySelectorAll('.nav').forEach(function(x){x.classList.remove('on')});n.classList.add('on');
   ['overview','task','log','cfg','diag'].forEach(function(v){var s=$('view-'+v);var show=v===n.dataset.v;s.classList.toggle('hidden',!show);if(show){s.classList.remove('rise');void s.offsetWidth;s.classList.add('rise')}});
+  if(n.dataset.v==='cfg'&&!serversLoaded)initServersFromState(lastState);
 }});
 /* 日志筛选与跟随 */
 document.querySelectorAll('.fbtn').forEach(function(b){b.onclick=function(){
@@ -398,7 +436,16 @@ function renderLogs(d){
   var empty=d.configured?'暂无日志 — 领到任务后，这里会显示每一单与错误':'尚未配置 — 打开「设置」粘贴网易云 Cookie 与密钥，保存后自动开始';
   var html=rows.length?rows.map(function(l){
     var isNew=newFrom>=0&&all.indexOf(l)>=newFrom;
-    return '<div class="lrow lv-'+esc(l.level)+(isNew?' new':'')+'"><span class="lt">'+hhmmss(l.ts)+'</span><span class="lb">'+esc(LV[l.level]||l.level)+'</span><span class="lm">'+esc(l.msg)+'</span></div>';
+    var raw=l.msg||'';
+    var prefix='';
+    if(l.serverName){
+      prefix='<span class="ltag">'+esc(l.serverName)+'</span>';
+    }else if(raw.charAt(0)==='['&&raw.indexOf(']')>1){
+      var idx=raw.indexOf(']');
+      prefix='<span class="ltag">'+esc(raw.slice(1,idx))+'</span>';
+      raw=raw.slice(idx+1).replace(/^\s+/,'');
+    }
+    return '<div class="lrow lv-'+esc(l.level)+(isNew?' new':'')+'"><span class="lt">'+hhmmss(l.ts)+'</span><span class="lb">'+esc(LV[l.level]||l.level)+'</span><span class="lm">'+prefix+esc(raw)+'</span></div>';
   }).join(''):'<div class="lempty">'+empty+'</div>';
   ['log','fullLog','taskLog'].forEach(function(id){var el=$(id);if(el)el.innerHTML=html});
   ['log','fullLog','taskLog'].forEach(function(id){var el=$(id);if(el&&follow)el.scrollTop=el.scrollHeight});
@@ -416,6 +463,15 @@ function renderChips(d){
 }
 function renderNow(d){
   var j=d.job;
+  var badge=$('nowServerBadge');
+  if(badge){
+    if(j&&j.serverName){
+      badge.textContent=j.serverName;
+      badge.classList.remove('hidden');
+    }else{
+      badge.classList.add('hidden');
+    }
+  }
   $('nowDot').className='dot '+(j?'live':'idle');
   $('nowState').textContent=j?'正在播放':'待命中';
   $('sideState').textContent=j?'▶':'·';
@@ -503,14 +559,170 @@ function poll(){
   },8000)});
   pollInFlight=Promise.race([request,timeout]).then(function(d){
     if(!d||typeof d.configured!=='boolean'||typeof d.browserReady!=='boolean'||!Number.isFinite(d.uptime)||!Array.isArray(d.logs)||!Array.isArray(d.hbIntervals))throw new Error('状态响应无效');
-    renderChips(d);renderNow(d);renderHb(d);renderStats(d);renderLogs(d);renderDiag(d);
+    renderChips(d);renderNow(d);renderHb(d);renderStats(d);renderServerCards(d);renderLogs(d);renderDiag(d);initServersFromState(d);
     lastState=d;return true;
   }).catch(function(){markStale();return false}).finally(function(){clearTimeout(timer);pollInFlight=null});
   return pollInFlight;
 }
-function saveCfg(){fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cookie:$('ncookie').value,key:$('nkey').value})}).then(function(r){return r.json().catch(function(){return {}})}).then(function(d){
-  if(d.ok){toast('已保存并应用');setTimeout(function(){location.reload()},600)}else toast(d.error||'保存失败',true);
-}).catch(function(){toast('保存失败：网络异常',true)})}
+function renderServerCards(d){
+  var el=$('serverCards');
+  if(!el)return;
+  var xs=d.servers||[];
+  if(!xs.length){el.innerHTML='';return}
+  el.innerHTML=xs.map(function(s){
+    var tagCls='ok', tagText='在线';
+    if(!s.enabled){tagCls='idle';tagText='已禁用'}
+    else if(!s.configured){tagCls='warn';tagText='未配置'}
+    else if(s.cooldownUntil&&s.cooldownUntil>Date.now()){tagCls='warn';tagText='冷却中'}
+    else if(s.lastApi&&!s.lastApi.ok){tagCls='err';tagText='异常 '+(s.lastApi.status||'')}
+    else if(s.lastApi&&s.lastApi.ok){tagCls='ok';tagText='正常'}
+    else{tagCls='idle';tagText='就绪'}
+
+    var acct=s.acctName?(esc(s.acctName)+(s.credits!=null?' · '+s.credits+'分':'')):(s.configured?'密钥就绪':'未登录');
+    var apiText=s.lastApi?(s.lastApi.ok?'连通正常 · '+ago(s.lastApi.at):'异常 '+(s.lastApi.status||'')+' · '+ago(s.lastApi.at)):'尚无请求';
+
+    return '<div class="srv-card glass">' +
+      '<div class="srv-head">' +
+        '<span class="srv-name" title="'+esc(s.name)+'">'+esc(s.name)+'</span>' +
+        '<span class="srv-tag '+tagCls+'">'+tagText+'</span>' +
+      '</div>' +
+      '<div class="srv-grid2">' +
+        '<div>帮听: <b>'+(s.helpUsed||0)+'s</b> / '+(s.helpLimit??9000)+'s</div>' +
+        '<div>被助: <b>'+(s.recv||0)+'次</b> / '+(s.recvLimit??26)+'次</div>' +
+        '<div>完成: <b>'+(s.jobsDone||0)+'</b> 单</div>' +
+        '<div>账号: <b>'+acct+'</b></div>' +
+      '</div>' +
+      '<div class="srv-foot">' +
+        '<span class="srv-url" title="'+esc(s.baseUrl)+'">'+esc(s.baseUrl)+'</span>' +
+        '<span>'+apiText+'</span>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+var serversData=[], serversLoaded=false, serverListEdited=false;
+function defaultServerRow(){
+  return {
+    id:'srv-'+Date.now()+'-'+Math.random().toString(36).slice(2,6),
+    name:'默认服务端',
+    baseUrl:'https://163music.linyu.qzz.io',
+    clientKey:'',
+    configured:false,
+    enabled:true
+  };
+}
+function initServersFromState(d){
+  if(serversLoaded||serverListEdited)return;
+  if(d&&Array.isArray(d.servers)&&d.servers.length){
+    serversData=d.servers.map(function(s,i){
+      return {
+        id:s.id||('srv-'+i),
+        name:s.name||('服务端 '+(i+1)),
+        baseUrl:s.baseUrl||'',
+        clientKey:'',
+        configured:Boolean(s.configured),
+        enabled:s.enabled!==false
+      };
+    });
+    serversLoaded=true;
+    renderServerRows();
+  }else if(d&&d.configured===false&&!serversLoaded){
+    serversData=[defaultServerRow()];
+    serversLoaded=true;
+    renderServerRows();
+  }else if(d&&d.configured&&(!d.servers||!d.servers.length)&&!serversLoaded){
+    var k=$('nkey');
+    serversData=[{
+      id:'default',
+      name:'默认服务端',
+      baseUrl:'https://163music.linyu.qzz.io',
+      clientKey:(k&&k.value)||'',
+      configured:true,
+      enabled:true
+    }];
+    serversLoaded=true;
+    renderServerRows();
+  }
+}
+function renderServerRows(){
+  var c=$('serverListContainer');
+  if(!c)return;
+  if(!serversData.length){
+    c.innerHTML='<div class="lempty" style="padding:8px 0">暂无服务端，请点击上方「+ 添加服务端」</div>';
+    return;
+  }
+  c.innerHTML=serversData.map(function(s,i){
+    var kp=s.configured?'已配置密钥 (留空保留) 或 mh_ck_...':'mh_ck_xxxxxxxx';
+    return '<div class="srv-item">' +
+      '<div class="srv-item-head">' +
+        '<span style="font-weight:600;font-size:12px;color:var(--t1)">#'+(i+1)+' '+esc(s.name||'未命名')+'</span>' +
+        '<div style="display:flex;align-items:center;gap:10px">' +
+          '<label class="srv-check"><input type="checkbox" '+(s.enabled?'checked':'')+' onchange="updateServerEnabled('+i+',this.checked)"> 启用</label>' +
+          (serversData.length>1?'<button type="button" class="tool" style="color:var(--err);border-color:rgba(255,107,107,.3)" onclick="removeServerRow('+i+')">删除</button>':'') +
+        '</div>' +
+      '</div>' +
+      '<div class="srv-grid">' +
+        '<div><label>备注名</label><input value="'+esc(s.name)+'" placeholder="如：主服" oninput="updateServerName('+i+',this.value)"/></div>' +
+        '<div><label>API 地址</label><input value="'+esc(s.baseUrl)+'" placeholder="如：https://..." oninput="updateServerUrl('+i+',this.value)"/></div>' +
+      '</div>' +
+      '<div><label>Portal 客户端密钥（mh_ck_ 开头）</label><input type="password" value="'+esc(s.clientKey)+'" placeholder="'+kp+'" oninput="updateServerKey('+i+',this.value)"/></div>' +
+    '</div>';
+  }).join('');
+}
+function addServerRow(){
+  serverListEdited=true;
+  serversLoaded=true;
+  serversData.push({
+    id:'srv-'+Date.now()+'-'+Math.random().toString(36).slice(2,6),
+    name:'服务端 '+(serversData.length+1),
+    baseUrl:'',
+    clientKey:'',
+    configured:false,
+    enabled:true
+  });
+  renderServerRows();
+}
+function removeServerRow(i){
+  serverListEdited=true;
+  serversData.splice(i,1);
+  renderServerRows();
+}
+function updateServerName(i,val){if(!serversData[i])return;serverListEdited=true;serversData[i].name=val}
+function updateServerUrl(i,val){if(!serversData[i])return;serverListEdited=true;serversData[i].baseUrl=val}
+function updateServerKey(i,val){if(!serversData[i])return;serverListEdited=true;serversData[i].clientKey=val;if(i===0){var k=$('nkey');if(k)k.value=val}}
+function updateServerEnabled(i,val){if(!serversData[i])return;serverListEdited=true;serversData[i].enabled=val}
+function saveCfg(){
+  var payload={cookie:$('ncookie').value};
+  var k=$('nkey');
+  if(k&&k.value)payload.key=k.value;
+  if(serverListEdited||serversData.length>0){
+    payload.servers=serversData.map(function(s,i){
+      var item={
+        id:s.id,
+        name:(s.name||'').trim(),
+        baseUrl:(s.baseUrl||'').trim(),
+        enabled:s.enabled!==false
+      };
+      if(s.clientKey&&s.clientKey.trim()){
+        item.clientKey=s.clientKey.trim();
+      }else if(i===0&&k&&k.value.trim()){
+        item.clientKey=k.value.trim();
+      }
+      return item;
+    });
+  }
+  fetch('/api/config',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(payload)
+  }).then(function(r){return r.json().catch(function(){return {}})}).then(function(d){
+    if(d.ok){
+      toast('已保存并应用');
+      setTimeout(function(){location.reload()},600);
+    }else{
+      toast(d.error||'保存失败',true);
+    }
+  }).catch(function(){toast('保存失败：网络异常',true)});
+}
 function clearCfg(){if(!confirm('确认清除配置？'))return;fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clear:true})}).then(function(r){return r.json().catch(function(){return {}})}).then(function(d){
   if(d.ok){toast('已清除');setTimeout(function(){location.reload()},600)}else toast(d.error||'清除失败',true)})}
 function doLogout(){fetch('/api/logout',{method:'POST'}).then(function(){location.reload()})}

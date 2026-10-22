@@ -124,6 +124,7 @@ export function createStatusServer({ port, state, staticDir }: { port: number; s
             helpUsed: state.helpUsed || 0, helpLimit: state.helpLimit ?? 9000,
             recv: state.recv || 0, recvLimit: state.recvLimit ?? 26,
             logs: (state.logs || []).slice(-50),
+            servers: state.servers || [],
           })); return;
         }
         if (req.method === 'POST' && req.url === '/api/config') {
