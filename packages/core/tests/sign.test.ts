@@ -6,14 +6,14 @@ import { buildSignHeaders } from '../dist/sign.js';
 /**
  * 独立参考实现：按服务端 hmac.go verifyRequestSignature 的规格（也是 4.x 客户端在用的算法）重写一遍，
  * 用于交叉验证 core 的实现，避免「测试与实现同源」的假绿。
- * 规格：key = mh_ck_ ? sha256(token) hex : token；消息 = METHOD\npath?query\nts\nnonce\nrawBody
+ * 规格：客户端密钥（mh_ck_/163_ck_）以 sha256(token) 派生，其他令牌使用原文；消息 = METHOD\npath?query\nts\nnonce\nrawBody
  */
 const refHmac = async (secret: string, data: string): Promise<string> =>
   createHmac('sha256', secret).update(data).digest('hex');
 
 function refSign(method: string, url: string, rawBody: string, token: string, ts: string, nonce: string): string {
   const u = new URL(url);
-  const key = token.startsWith('mh_ck_') ? createHash('sha256').update(token).digest('hex') : token;
+  const key = /^(?:mh|163)_ck_/.test(token) ? createHash('sha256').update(token).digest('hex') : token;
   const msg = [method, u.pathname + u.search, ts, nonce, rawBody].join('\n');
   return createHmac('sha256', key).update(msg).digest('hex');
 }
@@ -29,6 +29,15 @@ describe('sign（与服务端 hmac.go 对齐）', () => {
     assert.equal(h!['X-Nonce'], 'nonce123');
     assert.match(h!['X-Timestamp'], /^\d+$/);
     assert.equal(h!['X-Signature'], refSign('POST', url, body, token, h!['X-Timestamp'], 'nonce123'));
+  });
+
+  test('163_ck_ 客户端密钥同样以 sha256(token) 派生 HMAC 密钥', async () => {
+    const token = '163_ck_example';
+    const body = '{}';
+    const url = 'https://163help.daigua.icu/api/next';
+    const h = await buildSignHeaders('POST', url, body, token, refHmac, () => 'nonce163');
+    assert.ok(h);
+    assert.equal(h!['X-Signature'], refSign('POST', url, body, token, h!['X-Timestamp'], 'nonce163'));
   });
 
   test('签名消息用 path+query（不含 scheme/host）与原始 body（非 hash）', async () => {

@@ -1,6 +1,6 @@
 /**
  * API 签名（与 server hmac.go verifyRequestSignature 对齐；与 4.x 在用的客户端算法一致）。
- * - 密钥：mh_ck_ 客户端密钥 → sha256(token) 小写 hex（服务端只存 key 哈希）；会话 token → token 本身
+ * - 密钥：mh_ck_/163_ck_ 客户端密钥 → sha256(token) 小写 hex（服务端只存 key 哈希）；会话 token → token 本身
  * - 消息：METHOD\npath?query\ntimestamp\nnonce\nrawBody（path 含 query，与 r.URL.RequestURI() 一致）
  * - 请求头：X-Timestamp / X-Nonce / X-Signature（小写 hex）
  * - nonce 每次请求全新生成（修复「重试复用 nonce → 403 疑似重放」）
@@ -30,7 +30,7 @@ export async function buildSignHeaders(
   const path = u.pathname + u.search; // 与服务端 r.URL.RequestURI() 一致
   const timestamp = String(Math.floor(Date.now() / 1000));
   const nonce = nonceFn(); // 每次全新，绝不复用
-  const key = token.startsWith('mh_ck_') ? await subtleSha256(token) : token;
+  const key = /^(?:mh|163)_ck_/.test(token) ? await subtleSha256(token) : token;
   const msg = [method.toUpperCase(), path, timestamp, nonce, rawBody || ''].join('\n');
   return { 'X-Timestamp': timestamp, 'X-Nonce': nonce, 'X-Signature': await hmacFn(key, msg) };
 }

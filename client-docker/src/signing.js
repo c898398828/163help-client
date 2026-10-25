@@ -28,7 +28,7 @@ function sha256Hex(input) {
  */
 function hmacKeyForCredential(credential) {
   const cred = String(credential || '');
-  if (cred.startsWith(config.clientKeyPrefix)) {
+  if (/^(?:mh|163)_ck_/.test(cred)) {
     return sha256Hex(cred); // key 模式：密钥 = sha256(key) 小写 hex
   }
   return cred; // token 模式：密钥 = 凭证原文

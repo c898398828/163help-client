@@ -29,7 +29,7 @@ async function captureServer(reply: { status?: number; body?: unknown } | ((res:
 
 /** 参考签名：与服务端 hmac.go 对齐（同 core/tests/sign.test.ts 的规格） */
 function refSign(method: string, pathWithQuery: string, rawBody: string, token: string, ts: string, nonce: string): string {
-  const key = token.startsWith('mh_ck_') ? createHash('sha256').update(token).digest('hex') : token;
+  const key = /^(?:mh|163)_ck_/.test(token) ? createHash('sha256').update(token).digest('hex') : token;
   return createHmac('sha256', key).update([method, pathWithQuery, ts, nonce, rawBody].join('\n')).digest('hex');
 }
 
@@ -48,6 +48,18 @@ describe('docker API 传输（版本头 + HMAC 签名）', () => {
       const nonce = String(req.headers['x-nonce']);
       assert.match(ts, /^\d+$/);
       assert.equal(req.headers['x-signature'], refSign('POST', '/api/next', req.body, 'mh_ck_test', ts, nonce));
+    } finally { server.closeAllConnections(); server.close(); }
+  });
+
+  test('163_ck_ 密钥按客户端密钥算法签名，Bearer 保留完整凭证', async () => {
+    const { server, base, seen } = await captureServer();
+    try {
+      const api = createApi({ base, version: '4.0.21', clientType: 'docker', getToken: () => '163_ck_example' });
+      const r = await api('POST', '/api/next', {});
+      assert.equal(r.status, 200);
+      const req = seen[0]!;
+      assert.equal(req.headers['authorization'], 'Bearer 163_ck_example');
+      assert.equal(req.headers['x-signature'], refSign('POST', '/api/next', req.body, '163_ck_example', String(req.headers['x-timestamp']), String(req.headers['x-nonce'])));
     } finally { server.closeAllConnections(); server.close(); }
   });
 

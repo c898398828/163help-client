@@ -17,7 +17,7 @@ const BACKLOG_MAX = 20;
 const BACKLOG_FLUSH_MS = 10 * 60_000;
 
 const REDACT_RE = [
-  /mh_ck_[A-Za-z0-9_-]+/g,
+  /(?:mh|163)_ck_[A-Za-z0-9_-]+/g,
   /MUSIC_U=[^;&\s"'`]+/g,
   /[?&]token=[^&\s"'`]+/g,
 ];
