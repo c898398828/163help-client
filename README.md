@@ -80,7 +80,7 @@ docker load -i /tmp/163music-docker-client.tar.gz
 **要点**
 
 - **`UI_PASSWORD` 必设强密码**：Web 管理界面登录用，未设置容器会拒绝启动。
-- **管理界面**：`http://IP:13000`，粘贴网易云 Cookie + portal 客户端密钥（`mh_ck_` 开头）即可长期运行；宿主机端口冲突时自行映射，如 `-p 13000:3000`。
+- **管理界面**：`http://IP:13000`，粘贴网易云 Cookie + portal 客户端密钥即可长期运行；宿主机端口冲突时自行映射，如 `-p 13000:3000`。
 - **数据持久化**：`-v ./data:/data`（cookie / store / 会话），升级不丢数据。
 - **升级**：`docker pull ghcr.io/y08lin4/163help-client/docker-client:latest` → `docker rm -f 163music-docker-client` → 用**相同数据卷**重新 `docker run`；或直接重跑一键脚本（自动重建容器）。
 - **常驻参数**：`--restart unless-stopped`（崩溃自动拉起）+ `--memory 1g`（防无头浏览器吃爆内存）+ `-e TZ=Asia/Shanghai`。

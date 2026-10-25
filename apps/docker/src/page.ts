@@ -342,7 +342,7 @@ ${isAuthed ? `
         <div class="p-head"><span class="eyebrow">账号配置</span></div>
         <label>网易云 Cookie（完整串，含 MUSIC_U=…）</label>
         <textarea id="ncookie" placeholder="MUSIC_U=…; __csrf=…; …"></textarea>
-        <input id="nkey" type="hidden" placeholder="mh_ck_xxxxxxxx"/>
+        <input id="nkey" type="hidden" placeholder="请输入客户端密钥"/>
       </div>
       <div class="panel glass">
         <div class="p-head">
@@ -668,7 +668,7 @@ function renderServerRows(){
     return;
   }
   c.innerHTML=serversData.map(function(s,i){
-    var kp=s.configured?'已配置密钥 (留空保留) 或 mh_ck_...':'mh_ck_xxxxxxxx';
+    var kp=s.configured?'已配置密钥 (留空保留)':'请输入客户端密钥';
     return '<div class="srv-item">' +
       '<div class="srv-item-head">' +
         '<span id="srvTitle'+i+'" style="font-weight:600;font-size:12px;color:var(--t1)">#'+(i+1)+' '+esc(s.name||'未命名')+'</span>' +
@@ -681,7 +681,7 @@ function renderServerRows(){
         '<div><label>备注名</label><input value="'+esc(s.name)+'" placeholder="如：主服" oninput="updateServerName('+i+',this.value)"/></div>' +
         '<div><label>API 地址</label><input value="'+esc(s.baseUrl)+'" placeholder="如：https://163help.daigua.icu（根域名，不带/portal）" oninput="updateServerUrl('+i+',this.value)"/></div>' +
       '</div>' +
-      '<div><label>Portal 客户端密钥（mh_ck_ 开头）</label><input type="password" value="'+esc(s.clientKey)+'" placeholder="' + kp + '" oninput="updateServerKey('+i+',this.value)"/></div>' +
+      '<div><label>Portal 客户端密钥</label><input type="password" value="'+esc(s.clientKey)+'" placeholder="' + kp + '" oninput="updateServerKey('+i+',this.value)"/></div>' +
     '</div>';
   }).join('');
 }

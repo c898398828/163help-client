@@ -37,11 +37,11 @@ describe('applyConfigPatch（管理端配置写入）', () => {
     assert.equal(cur.clientKey, undefined);
   });
 
-  test('key 不是 mh_ck_ 前缀 → 报错且不写入', () => {
+  test('key 不限制固定前缀，可正常写入', () => {
     const cur: Record<string, unknown> = {};
-    const r = applyConfigPatch(cur, { key: 'wrong-key' });
-    assert.ok(r.error);
-    assert.equal(cur.clientKey, undefined);
+    const r = applyConfigPatch(cur, { key: 'custom-key' });
+    assert.equal(r.error, undefined);
+    assert.equal(cur.clientKey, 'custom-key');
   });
 
   test('值未变化时 saved 为空且不算错误（幂等保存）', () => {
@@ -63,12 +63,12 @@ describe('多服务端与配置迁移改造', () => {
   test('migrateLegacyConfig 自动将旧版单 key 转换为 servers 数组', () => {
     const legacy: SessionConfig = {
       neteaseCookie: 'MUSIC_U=test',
-      clientKey: 'mh_ck_legacy',
+      clientKey: 'legacy-token',
       servers: [],
     };
     const migrated = migrateLegacyConfig(legacy, 'https://default.server');
     assert.equal(migrated.servers.length, 1);
-    assert.equal(migrated.servers[0].clientKey, 'mh_ck_legacy');
+    assert.equal(migrated.servers[0].clientKey, 'legacy-token');
     assert.equal(migrated.servers[0].baseUrl, 'https://default.server');
     assert.equal(migrated.servers[0].enabled, true);
   });
@@ -88,16 +88,17 @@ describe('多服务端与配置迁移改造', () => {
     assert.equal(cur.servers[1].enabled, false);
   });
 
-  test('applyConfigPatch 校验服务端密钥前缀', () => {
+  test('applyConfigPatch 接受不带固定前缀的服务端密钥', () => {
     const cur: SessionConfig = { servers: [] };
     const patch = {
       servers: [
-        { id: 's1', name: '主服', baseUrl: 'https://163music.linyu.qzz.io', clientKey: 'bad_token', enabled: true }
+        { id: 's1', name: '主服', baseUrl: 'https://163music.linyu.qzz.io', clientKey: 'custom-token', enabled: true }
       ]
     };
     const res = applyConfigPatch(cur, patch);
-    assert.equal(Boolean(res.error), true);
-    assert.equal(res.saved.length, 0);
+    assert.equal(res.error, undefined);
+    assert.deepEqual(res.saved, ['servers']);
+    assert.equal(cur.servers?.[0]?.clientKey, 'custom-token');
   });
 
   test('applyConfigPatch 校验服务端 URL 协议与合法性', () => {
@@ -131,21 +132,22 @@ describe('多服务端与配置迁移改造', () => {
       clientKey: 'mh_ck_old',
       servers: [{ id: 's1', name: '主服', baseUrl: 'https://163music.linyu.qzz.io', clientKey: 'mh_ck_old', enabled: true }]
     };
-    // 带有效 cookie，但服务端 key 校验失败
+    // 带有效 cookie，但服务端 URL 校验失败
     const res1 = applyConfigPatch(cur, {
       cookie: 'MUSIC_U=new',
-      servers: [{ baseUrl: 'https://163music.linyu.qzz.io', clientKey: 'invalid_key' }]
+      servers: [{ baseUrl: 'not-a-valid-url', clientKey: 'custom_key' }]
     });
     assert.ok(res1.error);
     assert.equal(cur.neteaseCookie, 'MUSIC_U=old'); // 未被提前篡改为 new
 
-    // 带有效 cookie，但 key 前缀失败
+    // 自定义前缀 key 与 cookie 一起保存
     const res2 = applyConfigPatch(cur, {
       cookie: 'MUSIC_U=new2',
-      key: 'invalid_key'
+      key: 'custom_key'
     });
-    assert.ok(res2.error);
-    assert.equal(cur.neteaseCookie, 'MUSIC_U=old'); // 未被提前篡改
+    assert.equal(res2.error, undefined);
+    assert.equal(cur.neteaseCookie, 'MUSIC_U=new2');
+    assert.equal(cur.clientKey, 'custom_key');
   });
 
   test('servers 清空后同步清理 clientKey 防止删服复活', () => {

@@ -1,6 +1,6 @@
 /**
  * docker 主进程：Node 侧运行 core runtime；浏览器仅作播放器（Playwright）
- * 凭证：配置的 portal 客户端密钥（mh_ck_）作为存储 token（服务端 key 认证）
+ * 凭证：配置的 portal 客户端密钥作为存储 token（服务端 key 认证）
  * 管理端：server.js（:3000 容器内，宿主映射 13000）
  * 启动顺序：先起管理端（浏览器/网络异常时也能进 UI 看日志、改配置）→ 再拉起浏览器与任务循环。
  * 配置流：管理页保存 → 旧任务排空 → session.json 落盘 → 应用变更（仅 Cookie 变化时重载；任一步失败均报错）。

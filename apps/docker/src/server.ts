@@ -3,7 +3,7 @@
  * - GET /            仪表页（玻璃拟态 + 极光，深/浅主题，背景可选）
  * - GET /static/<f>  背景图片（启动时扫描静态目录建白名单，仅图片；无需登录）
  * - POST /api/login  UI_PASSWORD 登录（签发内存 session + HttpOnly Cookie）
- * - GET /api/state   状态快照（JSON）；POST /api/config 保存 Cookie/mh_ck_
+ * - GET /api/state   状态快照（JSON）；POST /api/config 保存 Cookie/客户端密钥
  */
 import http from 'node:http';
 import crypto from 'node:crypto';

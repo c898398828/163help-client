@@ -3,7 +3,7 @@
  * 规则：
  * - 空值不覆盖已保存值（防止「只改一项」时误清另一项）；
  * - clear:true 才显式清空；
- * - key 必须是 mh_ck_ 前缀（个人中心凭证），否则拒绝，避免存进无法使用的凭证；
+ * - key 支持各服务端的凭证格式，不在管理端限制固定前缀；
  * - 支持多服务端（servers 数组），自动剔除 API 地址末尾斜杠；
  * - 旧版单 key 自动向前迁移并同步维护。
  */
@@ -35,8 +35,6 @@ export interface SaveResult {
   error?: string;
 }
 
-const KEY_PREFIX = 'mh_ck_';
-
 export function normalizeServerUrl(url: string): string {
   if (!url || typeof url !== 'string') return '';
   let u = url.trim().replace(/\/+$/, '');
@@ -47,7 +45,7 @@ export function normalizeServerUrl(url: string): string {
 
 export function migrateLegacyConfig(cur: SessionConfig, defaultBaseUrl: string = 'https://163music.linyu.qzz.io'): SessionConfig {
   if (!cur.servers) cur.servers = [];
-  if (cur.clientKey && cur.clientKey.trim().startsWith(KEY_PREFIX) && cur.servers.length === 0) {
+  if (cur.clientKey && cur.clientKey.trim() && cur.servers.length === 0) {
     cur.servers.push({
       id: 'default',
       name: '默认服务端',
@@ -71,10 +69,6 @@ export function applyConfigPatch(cur: SessionConfig, patch: ConfigPatch, default
   const key = typeof patch?.key === 'string' ? patch.key.trim() : '';
 
   // 1. 全部输入校验置前，确保原子性（任何校验失败不修改 cur 对象）
-  if (key && !key.startsWith(KEY_PREFIX)) {
-    return { saved: [], error: `客户端密钥需以 ${KEY_PREFIX} 开头（个人中心 → 凭证管理）` };
-  }
-
   let nextServers: ServerConfigItem[] | null = null;
   if (Array.isArray(patch?.servers)) {
     nextServers = [];
@@ -127,10 +121,6 @@ export function applyConfigPatch(cur: SessionConfig, patch: ConfigPatch, default
         }
       } catch {
         return { saved: [], error: `第 ${i + 1} 个服务端的 API 地址格式非法：${baseUrl}` };
-      }
-
-      if (sKey && !sKey.startsWith(KEY_PREFIX)) {
-        return { saved: [], error: `服务端「${name}」的客户端密钥需以 ${KEY_PREFIX} 开头` };
       }
 
       nextServers.push({
