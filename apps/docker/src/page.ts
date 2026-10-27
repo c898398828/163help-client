@@ -102,8 +102,10 @@ body{font:13px/1.55 var(--sans);color:var(--t1);background:var(--bg);min-height:
 .side .foot b{color:var(--red2);cursor:pointer;font-weight:600;font-family:inherit}
 .tbtn{display:inline-flex;align-items:center;gap:6px;width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:var(--rs);background:var(--glass);color:var(--t2);font:inherit;font-size:12px;cursor:pointer;transition:border-color .18s ease,color .18s ease,transform .18s var(--ease)}
 .tbtn:hover{color:var(--t1);border-color:var(--t3);transform:translateY(-1px)}
-.main{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;padding:18px 22px 22px;overflow:hidden}
+.main{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;padding:18px 22px 22px;overflow-x:hidden;overflow-y:auto}
 .view{display:flex;flex-direction:column;gap:14px;flex:1;min-height:0}
+#view-overview{flex:0 0 auto}
+#view-overview .logpanel{flex:0 0 320px;min-height:320px}
 .view.rise{animation:rise .28s var(--ease) both}
 @keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 .eyebrow{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--t3);font-weight:700}
