@@ -77,11 +77,10 @@ describe('docker 管理端页面模板', () => {
     assert.match(authed, /min-height:\s*100(?:dvh|vh)/);
   });
 
-  test('长日志不撑高整页：壳层固定视口高，日志在面板内滚轮滚动', () => {
-    // 壳层必须是有界高度（height + overflow:hidden），否则日志的 max-content 会一路顶穿整页
+  test('总览内容超出视口时可滚动，日志仍在面板内滚动', () => {
+    // 壳层保持有界高度，主区负责页面滚动，日志继续作为独立滚动容器
     assert.match(authed, /\.shell\{[^}]*height:\s*100dvh[^}]*overflow:\s*hidden/);
-    // 主区允许收缩并裁剪，日志才会「吃掉剩余高度」而不是把页面撑开
-    assert.match(authed, /\.main\{[^}]*min-height:\s*0[^}]*overflow:\s*hidden/);
+    assert.match(authed, /\.main\{[^}]*min-height:\s*0[^}]*overflow-x:\s*hidden[^}]*overflow-y:\s*auto/);
     // 日志自身是滚动容器，且可收缩到 0（min-height:0）
     assert.match(authed, /\.log\{[^}]*overflow:\s*auto[^}]*flex:\s*1[^}]*min-height:\s*0/);
   });
