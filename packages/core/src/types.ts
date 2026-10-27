@@ -57,6 +57,9 @@ export interface NoTargetSummary {
   notSelf?: number;
   active?: number;
   withAvailableCredit?: number;
+  underMonthlyLimit?: number;
+  underActiveJobLimit?: number;
+  notInCooldown?: number;
 }
 
 export interface Participant {

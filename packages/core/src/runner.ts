@@ -434,10 +434,16 @@ export function formatNoTarget(r: unknown): string {
   const participants = n(s.participants), notSelf = n(s.notSelf), active = n(s.active);
   const withCredit = n(s.withAvailableCredit), underMonthly = n(s.underMonthlyLimit);
   const underActiveJobs = n(s.underActiveJobLimit), notInCooldown = n(s.notInCooldown);
-  // 服务端未下发明细（全 0）时不输出误导性的全 0 明细行
-  if (reason === 'contended' && !participants && !notSelf && !active && !withCredit && !underMonthly && !underActiveJobs && !notInCooldown) {
-    return '任务被抢，稍后再试';
-  }
+  const detailFields = [
+    'participants',
+    'notSelf',
+    'active',
+    'withAvailableCredit',
+    'underMonthlyLimit',
+    'underActiveJobLimit',
+    'notInCooldown',
+  ];
+  const hasDetail = detailFields.some((field) => Object.prototype.hasOwnProperty.call(s, field));
   const REASON_TEXT: Record<string, string> = {
     no_participants: '当前没人加入互助队列',
     only_self: '当前队列里只有你自己，不能给自己互助',
@@ -450,6 +456,9 @@ export function formatNoTarget(r: unknown): string {
     helper_banned: '网络环境不稳定，暂停互助一个小时',
     helper_busy: '你已有一个进行中的任务，完成后才会接下一单',
   };
+  if (!hasDetail) {
+    return reason === 'contended' ? '任务被抢，稍后再试' : REASON_TEXT[reason] || '暂无可互助目标';
+  }
   const detail = `入队 ${participants} / 非本人 ${notSelf} / 正常 ${active} / 有额度 ${withCredit} / 未到上限 ${underMonthly} / 未超并发 ${underActiveJobs} / 非冷却 ${notInCooldown}`;
   return `${REASON_TEXT[reason] || '暂无可互助目标'}（${detail}）`;
 }
