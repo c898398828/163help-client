@@ -81,6 +81,8 @@ describe('docker 管理端页面模板', () => {
     // 壳层保持有界高度，主区负责页面滚动，日志继续作为独立滚动容器
     assert.match(authed, /\.shell\{[^}]*height:\s*100dvh[^}]*overflow:\s*hidden/);
     assert.match(authed, /\.main\{[^}]*min-height:\s*0[^}]*overflow-x:\s*hidden[^}]*overflow-y:\s*auto/);
+    assert.match(authed, /#view-overview\{flex:\s*0 0 auto\}/);
+    assert.match(authed, /#view-overview \.logpanel\{[^}]*flex:\s*0 0 320px[^}]*min-height:\s*320px/);
     // 日志自身是滚动容器，且可收缩到 0（min-height:0）
     assert.match(authed, /\.log\{[^}]*overflow:\s*auto[^}]*flex:\s*1[^}]*min-height:\s*0/);
   });
