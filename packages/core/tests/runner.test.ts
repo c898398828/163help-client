@@ -355,6 +355,12 @@ describe('formatNoTarget（无单原因渲染，对齐 4.x 文案）', () => {
     assert.ok(!t.includes('入队 0'), t);
   });
 
+  test('服务端未下发明细时不伪造全 0 统计', () => {
+    const t = formatNoTarget({ reason: 'no_eligible_participant' });
+    assert.equal(t, '当前没有满足条件的互助目标');
+    assert.ok(!t.includes('入队 0'), t);
+  });
+
   test('未知 reason / 字符串 / 空值', () => {
     assert.ok(formatNoTarget({ reason: 'weird' }).includes('暂无可互助目标'));
     assert.equal(formatNoTarget('队列为空'), '队列为空');
