@@ -52,7 +52,7 @@ export class ServerWorker {
     this.config = deps.config;
     this.scheduler = deps.scheduler;
     this.pushLog = deps.pushLog;
-    this.clientVersion = deps.clientVersion || '4.3.5';
+    this.clientVersion = deps.clientVersion || '4.6.11';
 
     this.state = {
       id: deps.config.id,
@@ -253,8 +253,13 @@ export class ServerWorker {
       const res = await fetch(`${this.config.baseUrl}/api/client-version`, { signal: AbortSignal.timeout(3000) });
       if (res.ok) {
         const d = (await res.json()) as any;
-        if (d && typeof d.version === 'string' && d.version.trim()) {
-          this.clientVersion = d.version.trim();
+        const target = typeof d?.minVersion === 'string' && d.minVersion.trim()
+          ? d.minVersion.trim()
+          : (typeof d?.version === 'string' && d.version.trim() ? d.version.trim() : '');
+        if (target && target !== this.clientVersion) {
+          const prev = this.clientVersion;
+          this.clientVersion = target;
+          this.pushLog('info', `[${this.config.name}] 成功探测服务端版本，已自适应上报版本：${prev} → ${this.clientVersion}`);
         }
       }
     } catch { /* 忽略探测失败 */ }
@@ -262,7 +267,12 @@ export class ServerWorker {
 
   async start(): Promise<void> {
     if (!this.config.enabled || !this.config.clientKey.trim()) return;
-    void this.probeServerVersion();
+    try {
+      await Promise.race([
+        this.probeServerVersion(),
+        new Promise((resolve) => setTimeout(resolve, 1500)),
+      ]);
+    } catch { /* 忽略预探测超时或异常 */ }
     await this.runtime.start(true);
   }
 

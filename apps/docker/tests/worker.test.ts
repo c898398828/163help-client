@@ -24,6 +24,10 @@ const context = vm.createContext({
   clearTimeout,
   setInterval,
   clearInterval,
+  fetch: (...args: any[]) => (globalThis as any).fetch(...args),
+  AbortSignal: globalThis.AbortSignal,
+  Headers: globalThis.Headers,
+  Response: globalThis.Response,
 });
 vm.runInContext(workerSource + '\n;globalThis.ServerWorker = ServerWorker;', context);
 const ServerWorker = (context as any).ServerWorker;
@@ -722,5 +726,39 @@ describe('ServerWorker 封装与 Core Runtime 协同', () => {
     assert.equal(state.acctName, 'TestUser');
 
     await worker.stop();
+  });
+
+  test('ServerWorker 默认客户端版本为 4.6.11，且启动时预探测服务端版本并输出提示日志', async () => {
+    const { deps, logs } = createMockDeps({ clientVersion: '' });
+    const worker = new ServerWorker(deps);
+    assert.equal((worker as any).clientVersion, '4.6.11');
+
+    const origFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = async (url: any) => {
+        if (String(url).includes('/api/client-version')) {
+          return new Response(JSON.stringify({ ok: true, version: '4.6.15', minVersion: '4.6.15' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      };
+
+      let versionAtStart = '';
+      worker.runtime.start = async () => {
+        versionAtStart = (worker as any).clientVersion;
+      };
+
+      await worker.start();
+      assert.equal(versionAtStart, '4.6.15');
+      assert.equal((worker as any).clientVersion, '4.6.15');
+
+      const infoLog = logs.find((l) => l.level === 'info' && l.msg.includes('成功探测') && l.msg.includes('4.6.15'));
+      assert.ok(infoLog, '预探测成功应输出 info 级提示日志');
+    } finally {
+      globalThis.fetch = origFetch;
+      await worker.stop();
+    }
   });
 });
